@@ -10,7 +10,7 @@ import os
 
 import numpy as np
 import matplotlib.pyplot as plt
-from hyperspectral_import import (
+from preprocessing.hyperspectral_import import (
     compute_ndvi,
     export_native_paired_tiles,
     find_sentinel_band_files,
@@ -22,7 +22,7 @@ from hyperspectral_import import (
     upsample_hsi_to_rgb,
     validate_upsample_roundtrip,
 )
-from image_processing import normalize_to_uint8_robust, report_geotiff_spatial_info
+from models.image_processing import normalize_to_uint8_robust, report_geotiff_spatial_info
 
 
 S2_FOLDER = r"Maps/Atlanta(Tiles)/Atlanta_Hyperspectral"

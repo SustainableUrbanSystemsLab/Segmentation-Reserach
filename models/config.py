@@ -66,7 +66,7 @@ dino_refine_bounds_min_area_ratio = 0.80  # Accept refinements only when they sh
 
 # DINO prompt selection - see prompts.py for all available prompts
 # Each prompt gets its own DINO run, then all detections are merged before SAM.
-from prompts import AVAILABLE_PROMPTS
+from models.prompts import AVAILABLE_PROMPTS
 
 # NEN 8100 Wind Comfort Categories merged into three practical groups
 # A/B: comfortable, vegetated, sheltered outdoor areas

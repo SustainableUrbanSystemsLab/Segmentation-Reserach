@@ -19,7 +19,7 @@ from matplotlib.colors import rgb_to_hsv
 from PIL import Image
 from segment_anything import SamPredictor, sam_model_registry
 
-import config as cfg
+from models import config as cfg
 
 faulthandler.enable(all_threads=True)
 
@@ -62,20 +62,20 @@ if getattr(cfg, "dino_suppress_low_risk_warnings", False):
     except Exception:
         pass
 
-from dino_processing import (
+from models.dino_processing import (
     build_dino_model_and_transform,
     iter_tile_coords,
     run_dino_prompts,
     save_dino_detection_viz,
     save_dino_detection_viz_pil,
 )
-from dino_visualizations import (
+from visualizations.dino_visualizations import (
     save_per_prompt_breakdown,
     save_filtering_stage_comparison,
     save_detection_heatmap,
     save_box_size_distribution,
 )
-from image_processing import (
+from models.image_processing import (
     build_amenity_heatmap,
     get_loaded_extent_meters,
     load_rgb_image,
@@ -85,7 +85,7 @@ from image_processing import (
     report_geotiff_spatial_info,
     save_figure_high_resolution,
 )
-from sam_processing import (
+from models.sam_processing import (
     build_sam_predictor,
     generate_sam_masks_from_detections,
     generate_sam_masks_automatic,
@@ -787,7 +787,7 @@ elif cfg.use_dino:
 
     if not dino_records:
         print("[WARN] Grounding DINO produced no valid detections after filtering. Running tiled automatic SAM fallback.")
-        from sam_processing import resolve_device
+        from models.sam_processing import resolve_device
         log_image_stage("Running SAM fallback auto-generation", 3, PIPELINE_STAGE_TOTAL)
 
         device = resolve_device(cfg.sam_device)
@@ -830,7 +830,7 @@ elif cfg.use_dino:
         if cached_masks is not None:
             print(f"[INFO] Using cached SAM masks ({len(cached_masks)} masks)")
             masks = cached_masks
-            from sam_processing import resolve_device
+            from models.sam_processing import resolve_device
             sam_device = resolve_device(cfg.sam_device)
         else:
             predictor, sam_device = build_sam_predictor(cfg, img_model)
@@ -859,7 +859,7 @@ elif cfg.use_dino:
 else:
     log_image_stage("Running SAM auto-generation", 3, PIPELINE_STAGE_TOTAL)
     print("[INFO] Skipping DINO and using automatic SAM mask generation")
-    from sam_processing import resolve_device
+    from models.sam_processing import resolve_device
     
     device = resolve_device(cfg.sam_device)
     

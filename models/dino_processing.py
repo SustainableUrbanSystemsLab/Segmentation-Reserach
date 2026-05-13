@@ -11,7 +11,7 @@ from groundingdino.util.inference import load_model, predict
 from matplotlib.patches import Rectangle
 from PIL import Image
 
-import config as cfg
+from models import config as cfg
 
 
 def ensure_download(path: str, urls: list[str]) -> None:

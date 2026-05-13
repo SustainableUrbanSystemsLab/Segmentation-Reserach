@@ -6,21 +6,21 @@ import sys
 print("[DEBUG] Imports starting...", flush=True)
 
 try:
-    import config as cfg
+    from models import config as cfg
     print("[DEBUG] Config imported", flush=True)
 except Exception as e:
     print(f"[ERROR] Failed to import config: {e}", flush=True)
     sys.exit(1)
 
 try:
-    from dino_processing import run_dino_prompts
+    from models.dino_processing import run_dino_prompts
     print("[DEBUG] dino_processing imported", flush=True)
 except Exception as e:
     print(f"[ERROR] Failed to import dino_processing: {e}", flush=True)
     sys.exit(1)
 
 try:
-    from image_processing import load_rgb_image, report_geotiff_spatial_info
+    from models.image_processing import load_rgb_image, report_geotiff_spatial_info
     print("[DEBUG] image_processing imported", flush=True)
 except Exception as e:
     print(f"[ERROR] Failed to import image_processing: {e}", flush=True)
@@ -40,7 +40,7 @@ except Exception as e:
 # Try to initialize DINO
 print("[DEBUG] Initializing DINO...", flush=True)
 try:
-    from dino_processing import build_dino_model_and_transform
+    from models.dino_processing import build_dino_model_and_transform
     dino_model, dino_transform, device = build_dino_model_and_transform(cfg)
     print(f"[DEBUG] DINO model loaded on {device}", flush=True)
 except Exception as e:
