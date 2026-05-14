@@ -7,6 +7,10 @@ import sys
 from time import perf_counter
 import warnings
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 # Use non-interactive Agg backend to avoid pixmap allocation errors on large images
 import matplotlib
 matplotlib.use("Agg")
@@ -1291,36 +1295,218 @@ for prompt_name, selected_masks in selected_masks_by_prompt.items():
         combined |= expand_mask_to_full_image(m)
     combined_masks[prompt_name] = combined
 
-# Apply prompt priority: earlier prompts in ACTIVE_PROMPTS take precedence
-# (so sports_court masks remove overlapping building_roof, etc.)
-# Build ordered dict to access prompts in order
-prompt_order = list(cfg.dino_prompt_configs) if hasattr(cfg, 'dino_prompt_configs') else []
-prompt_names_ordered = [p['name'] for p in prompt_order]
 
-combined_masks_with_priority = {}
-accumulated_mask = np.zeros(img_model.shape[:2], dtype=bool)
-
-for prompt_name in prompt_names_ordered:
-    if prompt_name in combined_masks:
-        # Remove areas already claimed by higher-priority prompts
-        original_mask = combined_masks[prompt_name]
-        priority_mask = original_mask.copy()
-        priority_mask &= ~accumulated_mask  # Subtract accumulated mask from earlier prompts
-        combined_masks_with_priority[prompt_name] = priority_mask
+def _apply_tier_thresholds(
+    combined_masks: dict[str, np.ndarray],
+    selected_masks_by_prompt: dict[str, list[dict]],
+    image_shape: tuple[int, int],
+    e_threshold: float = 0.25,
+    c_threshold: float = 0.15,
+) -> dict[str, np.ndarray]:
+    """Apply confidence thresholds to tier assignments.
+    
+    Only assign E (uncomfortable) tier if score > e_threshold.
+    Only assign C (pedestrian) tier if score > c_threshold.
+    Otherwise default to A (comfortable) tier.
+    
+    Args:
+        combined_masks: Dict of prompt_name -> full-image boolean mask
+        selected_masks_by_prompt: Dict of prompt_name -> list of selected mask dicts (with scores)
+        image_shape: (height, width) tuple
+        e_threshold: Minimum CLIP score for E tier assignment
+        c_threshold: Minimum CLIP score for C tier assignment
+    
+    Returns:
+        Refined combined_masks dict with threshold-based tier reassignment
+    """
+    h, w = image_shape
+    
+    # Build full-image score maps for each tier
+    tier_scores = {
+        "nen_cat_a": np.full((h, w), -np.inf, dtype=np.float32),
+        "nen_cat_c": np.full((h, w), -np.inf, dtype=np.float32),
+        "nen_cat_e": np.full((h, w), -np.inf, dtype=np.float32),
+    }
+    
+    # Fill score maps from selected masks
+    for prompt_name, masks in selected_masks_by_prompt.items():
+        if prompt_name not in tier_scores:
+            continue
         
-        # DEBUG: Log mask pixel counts
-        original_pixels = original_mask.sum()
-        remaining_pixels = priority_mask.sum()
-        removed_pixels = original_pixels - remaining_pixels
-        print(f"[DEBUG] {prompt_name}: {original_pixels:,} pixels → {remaining_pixels:,} pixels (removed {removed_pixels:,} due to priority masking)")
-        
-        accumulated_mask |= priority_mask
-    else:
-        combined_masks_with_priority[prompt_name] = np.zeros(img_model.shape[:2], dtype=bool)
-        print(f"[DEBUG] {prompt_name}: NOT FOUND in combined_masks - creating empty mask")
+        for mask_dict in masks:
+            mask_bool = expand_mask_to_full_image(mask_dict)
+            if not np.any(mask_bool):
+                continue
+            
+            score_key = f"clip_score_{prompt_name}"
+            score = float(mask_dict.get(score_key, mask_dict.get("score", 0.0)))
+            
+            # Update pixels where this score is better than previously seen
+            update_pixels = mask_bool & (score > tier_scores[prompt_name])
+            if np.any(update_pixels):
+                tier_scores[prompt_name][update_pixels] = score
+    
+    # For each pixel, apply threshold-based tier selection: E -> C -> A
+    e_scores = tier_scores["nen_cat_e"]
+    c_scores = tier_scores["nen_cat_c"]
+    a_scores = tier_scores["nen_cat_a"]
+    
+    # Build refined masks based on thresholds
+    e_confident = e_scores > e_threshold
+    c_confident = c_scores > c_threshold
+    
+    # Pixel assignment logic:
+    # 1. If E score is high enough, assign to E
+    # 2. Else if C score is high enough, assign to C
+    # 3. Else assign to A (or leave as default if A score is too low)
+    
+    refined_masks = {
+        "nen_cat_a": np.zeros((h, w), dtype=bool),
+        "nen_cat_c": np.zeros((h, w), dtype=bool),
+        "nen_cat_e": np.zeros((h, w), dtype=bool),
+    }
+    
+    # Assign E tier (only if confident)
+    refined_masks["nen_cat_e"] = e_confident.copy()
+    
+    # Assign C tier (only if confident AND not already assigned to E)
+    c_and_not_e = c_confident & ~e_confident
+    refined_masks["nen_cat_c"] = c_and_not_e.copy()
+    
+    # Assign A tier (fallback: default to A if not C or E, or if A score is reasonable)
+    not_e_or_c = ~e_confident & ~c_confident
+    a_or_unassigned = (a_scores > -np.inf) | not_e_or_c
+    refined_masks["nen_cat_a"] = a_or_unassigned.copy()
+    
+    # Ensure pixel-level winner-takes-all to avoid overlaps
+    # Give priority: E > C > A
+    final_masks = {
+        "nen_cat_e": refined_masks["nen_cat_e"].copy(),
+        "nen_cat_c": refined_masks["nen_cat_c"].copy() & ~refined_masks["nen_cat_e"],
+        "nen_cat_a": refined_masks["nen_cat_a"].copy() & ~refined_masks["nen_cat_e"] & ~refined_masks["nen_cat_c"],
+    }
+    
+    # Print statistics
+    print("[INFO] Tier threshold refinement:")
+    print(f"  E threshold: {e_threshold:.3f}, pixels assigned: {final_masks['nen_cat_e'].sum():,}")
+    print(f"  C threshold: {c_threshold:.3f}, pixels assigned: {final_masks['nen_cat_c'].sum():,}")
+    print(f"  A (fallback): pixels assigned: {final_masks['nen_cat_a'].sum():,}")
+    
+    return final_masks
 
-# Use priority-ordered masks instead
-combined_masks = combined_masks_with_priority
+
+# Apply tier thresholds to reduce false positive uncomfortable (E) tier assignments
+tier_e_threshold = float(getattr(cfg, "tier_e_threshold", 0.25))
+tier_c_threshold = float(getattr(cfg, "tier_c_threshold", 0.15))
+if tier_e_threshold > 0 or tier_c_threshold > 0:
+    print(f"[INFO] Applying tier thresholds: E={tier_e_threshold:.3f}, C={tier_c_threshold:.3f}")
+    combined_masks = _apply_tier_thresholds(
+        combined_masks,
+        selected_masks_by_prompt,
+        img_model.shape[:2],
+        e_threshold=tier_e_threshold,
+        c_threshold=tier_c_threshold,
+    )
+
+
+def _build_full_image_prompt_masks(
+    selected_masks_by_prompt: dict[str, list[dict]],
+    image_shape: tuple[int, int],
+    prompt_names_ordered: list[str],
+) -> dict[str, np.ndarray]:
+    """Build a full-image, winner-takes-all mask for each prompt.
+
+    Pixels covered by one or more prompt masks are assigned to the prompt with the highest
+    score at that pixel. Uncovered pixels are filled by the nearest labeled region so the
+    output covers the entire image.
+    """
+    h, w = image_shape
+    if not prompt_names_ordered:
+        return {}
+
+    # Memory-safe winner-takes-all pass: avoid stacking per-prompt full-size score maps.
+    best_score_map = np.full((h, w), -np.inf, dtype=np.float32)
+    winner_indices = np.zeros((h, w), dtype=np.uint8)
+    covered = np.zeros((h, w), dtype=bool)
+    prompt_best_scores: dict[str, float] = {name: float("-inf") for name in prompt_names_ordered}
+
+    for prompt_idx, prompt_name in enumerate(prompt_names_ordered):
+        score_key = f"clip_score_{prompt_name}"
+        for mask in selected_masks_by_prompt.get(prompt_name, []):
+            mask_bool = expand_mask_to_full_image(mask)
+            if not np.any(mask_bool):
+                continue
+
+            score = float(mask.get(score_key, mask.get("score", 0.0)))
+            prompt_best_scores[prompt_name] = max(prompt_best_scores[prompt_name], score)
+
+            update_pixels = mask_bool & (score > best_score_map)
+            if not np.any(update_pixels):
+                continue
+
+            best_score_map[update_pixels] = score
+            winner_indices[update_pixels] = np.uint8(prompt_idx)
+            covered[update_pixels] = True
+
+    # Ensure full-image assignment for pixels that were never covered by any selected mask.
+    if not np.all(covered):
+        best_prompt_idx = 0
+        best_prompt_score = float("-inf")
+        for idx, prompt_name in enumerate(prompt_names_ordered):
+            score = prompt_best_scores.get(prompt_name, float("-inf"))
+            if score > best_prompt_score:
+                best_prompt_idx = idx
+                best_prompt_score = score
+
+        # If all prompts are empty, keep index 0 as deterministic fallback.
+        winner_indices[~covered] = np.uint8(best_prompt_idx)
+
+    full_image_masks: dict[str, np.ndarray] = {}
+    for idx, prompt_name in enumerate(prompt_names_ordered):
+        full_image_masks[prompt_name] = winner_indices == idx
+
+    return full_image_masks
+
+prompt_order = list(cfg.dino_prompt_configs) if hasattr(cfg, "dino_prompt_configs") else []
+prompt_names_ordered = [p["name"] for p in prompt_order]
+
+if bool(getattr(cfg, "full_image_mask_mode", False)):
+    print("[INFO] Full-image mask mode enabled: assigning every pixel to the highest-scoring prompt")
+    combined_masks = _build_full_image_prompt_masks(
+        selected_masks_by_prompt,
+        img_model.shape[:2],
+        prompt_names_ordered,
+    )
+    for prompt_name in prompt_names_ordered:
+        mask_pixels = int(combined_masks.get(prompt_name, np.zeros(img_model.shape[:2], dtype=bool)).sum())
+        print(f"[DEBUG] {prompt_name}: full-image pixels = {mask_pixels:,}")
+else:
+    # Apply prompt priority: earlier prompts in ACTIVE_PROMPTS take precedence
+    # (so sports_court masks remove overlapping building_roof, etc.)
+    combined_masks_with_priority = {}
+    accumulated_mask = np.zeros(img_model.shape[:2], dtype=bool)
+
+    for prompt_name in prompt_names_ordered:
+        if prompt_name in combined_masks:
+            original_mask = combined_masks[prompt_name]
+            priority_mask = original_mask.copy()
+            priority_mask &= ~accumulated_mask
+            combined_masks_with_priority[prompt_name] = priority_mask
+
+            original_pixels = original_mask.sum()
+            remaining_pixels = priority_mask.sum()
+            removed_pixels = original_pixels - remaining_pixels
+            print(
+                f"[DEBUG] {prompt_name}: {original_pixels:,} pixels → {remaining_pixels:,} pixels "
+                f"(removed {removed_pixels:,} due to priority masking)"
+            )
+
+            accumulated_mask |= priority_mask
+        else:
+            combined_masks_with_priority[prompt_name] = np.zeros(img_model.shape[:2], dtype=bool)
+            print(f"[DEBUG] {prompt_name}: NOT FOUND in combined_masks - creating empty mask")
+
+    combined_masks = combined_masks_with_priority
 
 # Compute overlap mask (union of all masks)
 union_of_all = np.zeros(img_model.shape[:2], dtype=bool)

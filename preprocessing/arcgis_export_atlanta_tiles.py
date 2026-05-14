@@ -49,16 +49,16 @@ SOURCE_CRS = "EPSG:26916"  # NAD83 / UTM Zone 16N
 # 19 = ~0.25m/px (highest quality, ~1.6GB total)
 # 18 = ~0.5m/px  (good quality, ~600MB total)
 # 17 = ~1.0m/px  (fast download, ~200MB total)
-ZOOM_LEVEL = 19
+ZOOM_LEVEL = 18
  
 # Tile size in pixels — must match zoom resolution to equal 500m
 # zoom 19 (0.25m/px): 2000px = 500m
 # zoom 18 (0.5m/px):  1000px = 500m
 # zoom 17 (1.0m/px):   500px = 500m
-TILE_SIZE_PX = 2000
+TILE_SIZE_PX = 1000
  
 # Output paths
-BASE_RASTER_PATH = r"C:\Tiles\Atlanta_base_z19.tif"   # downloaded full raster
+BASE_RASTER_PATH = r"C:\Tiles\Atlanta_base_z18.tif"   # downloaded full raster
 OUTPUT_FOLDER    = r"C:\Tiles\Atlanta_split"           # individual tile GeoTIFFs
 TILE_PREFIX      = "tile"
  
@@ -151,7 +151,7 @@ def _download_base_raster(
 ) -> None:
     """Download imagery via contextily and save as Web Mercator GeoTIFF."""
     _log(f"Downloading imagery at zoom {zoom} from Esri World Imagery...")
-    _log("This may take several minutes for zoom 19 — please wait.")
+    _log("This may take several minutes for zoom 18 — please wait.")
  
     _safe_make_dir(os.path.dirname(out_path) or ".")
  

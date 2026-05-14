@@ -1,5 +1,6 @@
 from pathlib import Path
 from time import perf_counter
+import os
 
 import groundingdino
 import groundingdino.datasets.transforms as T
@@ -163,14 +164,38 @@ def _run_dino_inference(
 ):
     image_pil = Image.fromarray(image_rgb)
     image_tensor, _ = dino_transform(image_pil, None)
-    boxes_local, logits_local, phrases_local = predict(
-        model=dino_model,
-        image=image_tensor,
-        caption=caption,
-        box_threshold=box_th,
-        text_threshold=text_th,
-        device=dino_device,
-    )
+    # Temporarily disable torch.compile / Dynamo and limit intra-op threads
+    prev_torch_compile = os.environ.get("TORCH_COMPILE_DISABLE")
+    prev_pytorch_no_dynamo = os.environ.get("PYTORCH_NO_DYNAMO")
+    prev_num_threads = torch.get_num_threads()
+    os.environ["TORCH_COMPILE_DISABLE"] = "1"
+    os.environ["PYTORCH_NO_DYNAMO"] = "1"
+    torch.set_num_threads(1)
+    try:
+        boxes_local, logits_local, phrases_local = predict(
+            model=dino_model,
+            image=image_tensor,
+            caption=caption,
+            box_threshold=box_th,
+            text_threshold=text_th,
+            device=dino_device,
+        )
+    finally:
+        # Restore environment and thread settings
+        if prev_torch_compile is None:
+            os.environ.pop("TORCH_COMPILE_DISABLE", None)
+        else:
+            os.environ["TORCH_COMPILE_DISABLE"] = prev_torch_compile
+
+        if prev_pytorch_no_dynamo is None:
+            os.environ.pop("PYTORCH_NO_DYNAMO", None)
+        else:
+            os.environ["PYTORCH_NO_DYNAMO"] = prev_pytorch_no_dynamo
+
+        try:
+            torch.set_num_threads(prev_num_threads)
+        except Exception:
+            pass
     logits_np_local = (
         logits_local.detach().cpu().numpy()
         if hasattr(logits_local, "detach")

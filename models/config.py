@@ -39,7 +39,7 @@ large_image_tile_overlap_px = 384
 
 # Caching settings - saves DINO and SAM results to disk to avoid re-computation on error recovery
 enable_pipeline_caching = True  # Set to True to cache DINO/SAM intermediate results between runs
-overwrite_pipeline_cache = True  # Force recomputation after prompt changes so the cache is refreshed
+overwrite_pipeline_cache = False  # Force recomputation after prompt changes so the cache is refreshed
 
 # DINO settings - Set use_dino=False to skip DINO and use SAM's automatic mask generation instead
 use_dino = True
@@ -77,6 +77,17 @@ ACTIVE_PROMPTS = [
     "nen_cat_c",
     "nen_cat_e",
 ]
+
+# When enabled, every pixel is assigned to the active prompt with the highest score,
+# and uncovered pixels are filled by the nearest labeled region.
+full_image_mask_mode = True
+
+# Tier threshold refinement - prevents excessive uncomfortable (E) tier assignments
+# Only assign E tier if CLIP score > tier_e_threshold; otherwise fall back to C or A
+# Only assign C tier if CLIP score > tier_c_threshold; otherwise fall back to A
+# Set to 0 to disable threshold filtering
+tier_e_threshold = 0.34  # Only assign E if clearly dominant
+tier_c_threshold = 0.22  # Only assign C if moderately confident
 
 # Auto-build dino_prompt_configs from selected prompts
 dino_prompt_configs = [
