@@ -506,132 +506,170 @@ AVAILABLE_PROMPTS = {
         "max_saturation": 1.0,
         "min_value": 0.20,
     },
-    # NEN 8100 Wind Comfort Categories (A-E) using environmental proxy descriptors
-    # These prompts use keywords that DINO can detect to classify areas by wind comfort suitability
+    # NEN 8100 Wind Comfort Categories (A-E) using environmental proxy descriptors.
+    # These prompts are tuned so DINO and SAM point at the same physical cues.
     "nen_cat_a": {
-        # Combined Category A/B: sheltered, vegetated, comfortable outdoor areas for sitting and lingering.
-        # Kept broad, but less catch-all than before to avoid swallowing whole campuses.
-        "caption": "tree canopy . dense vegetation . green park . sports field . athletic field . grass lawn . tree cover . wooded area . urban forest . green space . park greenery . vegetated ground",
-        "negative_dino_caption": "highway . parking lot . major road . freeway . road . asphalt . parking deck",
-        "box_threshold": 0.18,
-        "text_threshold": 0.15,
-        "keywords": ("park", "green", "plaza", "seating", "trees", "shade", "courtyard", "garden", "patio", "bench"),
-        "negative_keywords": ("parking", "highway", "freeway", "major road", "road"),
+            # Category A: places where people can stay for a long time, including seating-rich and recreational outdoor spaces.
+            "caption": (
+                "green park with trees seen from above . "
+                "dense tree canopy overhead view . "
+                "sports field green grass aerial . "
+                "swimming pool with deck surrounding aerial . "
+                "garden courtyard overhead view . "
+                "playground equipment surrounded by grass aerial"
+        ),
+        "negative_dino_caption": "highway . freeway . parking lot . road . industrial yard . empty field . bare hardscape . roof",
+        "negative_box_threshold": 0.40,
+        "negative_text_threshold": 0.36,
+        "box_threshold": 0.06,
+        "text_threshold": 0.04,
+        "keywords": ("outdoor", "dining", "patio", "seating", "courtyard", "plaza", "park", "garden", "pool", "picnic", "playground", "recreation"),
+        "negative_keywords": ("highway", "freeway", "parking", "road", "industrial", "empty", "hardscape", "roof"),
         "min_aspect_ratio": 0.45,
         "max_aspect_ratio": 14.0,
-        "min_box_side_px": 24,
+        "min_box_side_px": 16,
         "max_split_boxes_per_detection": 128,
         "enable_area_split": False,
         "enable_tiled_fallback": True,
         "max_area_meters_sq": 120000,
-        "negative_captions": ["highway", "freeway", "parking lot", "major road", "road"],
+        "negative_captions": ["highway", "freeway", "parking lot", "road", "industrial yard", "bare hardscape", "roof"],
         "clip_negative_weight": 0.30,
-        "clip_top_k": 60,
-        "clip_score_threshold": -0.05,
-        "clip_relative_score_margin": 0.10,
+        "clip_top_k": 120,
+        "clip_score_threshold": -0.28,
+        "clip_relative_score_margin": 0.12,
         #"clip_min_area_ratio": 0.0001,
         #"clip_max_area_ratio": 0.55,
         "max_saturation": 1.0,
         "min_value": 0.15,
     },
     "nen_cat_b": {
-        # Category B (2.5-5%): "Good – acceptable for strolling, short sitting"
-        # Proxy: pedestrian-friendly areas with some seating and vegetation
-        "caption": "pedestrians. pedestrian path . outdoor area with trees and benches . walkable plaza . gathering area with vegetation . public square with shade . park-like setting",
-        "negative_dino_caption": "parking lot . highway . empty field . rooftop . construction . bare hardscape . windswept open area",
-        "box_threshold": 0.24,
-        "text_threshold": 0.20,
-        "keywords": ("pedestrian", "seating", "trees", "plaza", "walkable", "gathering", "vegetation", "benches", "square"),
-        "negative_keywords": ("parking", "highway", "empty", "rooftop", "construction", "bare", "windswept"),
+        # Category B: very pedestrian-friendly trails, benches, light outdoor seating, and residential neighborhoods.
+        "caption": (
+            "tree-lined campus walkway aerial view . "
+            "pedestrian plaza with benches overhead . "
+            "residential sidewalk network aerial view . "
+            "quiet neighborhood block with lawns and trees from above . "
+            "small park path aerial view . "
+            "walkable campus greenway from above"
+        ),
+        "negative_dino_caption": "highway . freeway . parking lot . major road . industrial yard . rooftop . barren hardscape . empty field",
+        "negative_box_threshold": 0.40,
+        "negative_text_threshold": 0.35,
+        "box_threshold": 0.08,
+        "text_threshold": 0.06,
+        "keywords": ("pedestrian", "trail", "sidewalk", "residential", "neighborhood", "street", "park", "path", "bench", "greenway", "plaza"),
+        "negative_keywords": ("highway", "freeway", "parking", "industrial", "roof", "empty", "barren"),
         "min_aspect_ratio": 0.5,
         "max_aspect_ratio": 12.0,
-        "min_box_side_px": 26,
+        "min_box_side_px": 18,
         "max_split_boxes_per_detection": 90,
         "enable_area_split": False,
         "enable_tiled_fallback": True,
         "max_area_meters_sq": 100000,
-        "negative_captions": ["parking lot", "highway", "empty field", "rooftop", "bare pavement"],
+        "negative_captions": ["highway", "freeway", "parking lot", "major road", "industrial yard", "empty field", "rooftop"],
         "clip_negative_weight": 0.36,
-        "clip_top_k": 50,
-        "clip_score_threshold": 0.0,
-        "clip_relative_score_margin": 0.11,
+        "clip_top_k": 100,
+        "clip_score_threshold": -0.25,
+        "clip_relative_score_margin": 0.14,
         "clip_min_area_ratio": 0.0002,
         "clip_max_area_ratio": 0.45,
         "max_saturation": 1.0,
         "min_value": 0.18,
     },
     "nen_cat_c": {
-        # Combined Category C/D: pedestrian-accessible outdoor spaces - open paved areas, walking zones, transitional areas.
-        # Focus on walkable and paved circulation areas instead of generic open space.
-        "caption": "pedestrian walkway . paved path . sidewalk . plaza . courtyard . promenade . public path . accessible walkway . paved pedestrian area . transit plaza",
-        "negative_dino_caption": "highway . freeway . parking lot . major road . rooftop . roof . highway ramp",
-        "box_threshold": 0.16,
-        "text_threshold": 0.13,
-        "keywords": ("pedestrian", "walkway", "paved", "plaza", "path", "accessible", "sidewalk", "courtyard", "promenade"),
-        "negative_keywords": ("highway", "freeway", "parking", "major road", "roof", "rooftop", "open space"),
+        # Category C: comfortable to walk through, but not a place meant for lingering.
+        "caption": (
+            "mixed urban blocks with buildings and small roads aerial . "
+            "city street grid overhead view . "
+            "urban commercial district moderate density aerial . "
+            "city blocks with surface parking overhead . "
+            "urban neighborhood streets from above"
+        ),
+        "negative_dino_caption": "highway . freeway . large parking lot . multilane road . industrial yard . rooftop . blank field . major interchange",
+        "negative_box_threshold": 0.38,
+        "negative_text_threshold": 0.34,
+        "box_threshold": 0.06,
+        "text_threshold": 0.04,
+        "keywords": ("sidewalk", "street", "road", "parking", "green", "service", "courtyard", "walkway", "neighborhood", "corner", "local"),
+        "negative_keywords": ("highway", "freeway", "large", "multilane", "industrial", "roof", "blank", "interchange"),
         "min_aspect_ratio": 0.45,
         "max_aspect_ratio": 20.0,
-        "min_box_side_px": 22,
+        "min_box_side_px": 16,
         "max_split_boxes_per_detection": 150,
         "enable_area_split": False,
         "enable_tiled_fallback": True,
         "max_area_meters_sq": 150000,
-        "negative_captions": ["highway", "freeway", "parking lot", "major road", "rooftop", "open space"],
+        "negative_captions": ["highway", "freeway", "large parking lot", "multilane road", "industrial yard", "rooftop", "blank field"],
         "clip_negative_weight": 0.28,
-        "clip_top_k": 70,
-        "clip_score_threshold": -0.18,
-        "clip_relative_score_margin": 0.08,
+        "clip_top_k": 100,
+        "clip_score_threshold": -0.22,
+        "clip_relative_score_margin": 0.14,
         #"clip_min_area_ratio": 0.00008,
         #"clip_max_area_ratio": 0.60,
         "max_saturation": 1.0,
         "min_value": 0.12,
     },
     "nen_cat_d": {
-        # Category D has been merged into Category C.
-        "caption": "exposed open area . windy plaza . minimally vegetated outdoor space . sparse pedestrian zone . exposed pavement area . windswept open plaza . minimal shelter area",
-        "negative_dino_caption": "dense trees . sheltered plaza . park seating . outdoor cafe . covered area . building shelter . heavily vegetated",
-        "box_threshold": 0.20,
-        "text_threshold": 0.16,
-        "keywords": ("exposed", "open", "windswept", "minimal", "sparse", "area", "pavement", "plaza"),
-        "negative_keywords": ("trees", "sheltered", "seating", "cafe", "covered", "building", "vegetated", "dense"),
+        # Category D: safe to traverse, but mostly exposed hardscape, large parking fields, and broader roads.
+        "caption": (
+            "surface parking lot aerial view . "
+            "broad asphalt lot with marked stalls overhead . "
+            "industrial loading area aerial view . "
+            "big box retail parking field from above "
+            #"exposed concrete hardscape aerial view"
+        ),
+        "negative_dino_caption": "highway . freeway interchange . pedestrian plaza . sidewalk . park . seating . garden . residential street",
+        "negative_box_threshold": 0.40,
+        "negative_text_threshold": 0.36,
+        "box_threshold": 0.08,
+        "text_threshold": 0.06,
+        "keywords": ("parking", "multilane", "road", "asphalt", "concrete", "vacant", "dirt", "hardscape", "industrial", "loading"),
+        "negative_keywords": ("highway", "freeway", "pedestrian", "plaza", "sidewalk", "park", "garden", "residential"),
         "min_aspect_ratio": 0.4,
         "max_aspect_ratio": 20.0,
-        "min_box_side_px": 22,
+        "min_box_side_px": 16,
         "max_split_boxes_per_detection": 110,
         "enable_area_split": False,
         "enable_tiled_fallback": True,
         "max_area_meters_sq": 150000,
-        "negative_captions": ["sheltered plaza", "park", "seating", "outdoor cafe", "covered area", "vegetation"],
+        "negative_captions": ["highway", "freeway", "pedestrian plaza", "sidewalk", "park", "seating", "garden"],
         "clip_negative_weight": 0.40,
-        "clip_top_k": 50,
-        "clip_score_threshold": -0.08,
-        "clip_relative_score_margin": 0.10,
+        "clip_top_k": 100,
+        "clip_score_threshold": -0.22,
+        "clip_relative_score_margin": 0.12,
         "clip_min_area_ratio": 0.0002,
         "clip_max_area_ratio": 0.65,
         "max_saturation": 1.0,
         "min_value": 0.15,
     },
     "nen_cat_e": {
-        # Category E: highways, roofs, parking areas, and other inaccessible/no-access infrastructure and hardscape.
-        # Captures major roads, freeways, rooftops, parking structures, service areas, industrial hardscape
-        "caption": "highway interchange . freeway overpass . multilane road . open surface parking lot . parking garage structure . rail yard . airport tarmac . industrial loading dock . high-density buildings",
-        "negative_dino_caption": "vegetation . park . pedestrian area . outdoor seating . plaza . courtyard",
-        "box_threshold": 0.22,
-        "text_threshold": 0.18,
-        "keywords": ("highway", "freeway", "road", "roof", "rooftop", "parking", "service", "industrial", "building"),
+        # Category E/U: inhospitable pedestrian environments, especially highways and roads with four or more lanes.
+        "caption": (
+            "highway interchange cloverleaf aerial view . "
+            "freeway with multiple lanes overhead . "
+            "rail yard with train tracks aerial . "
+            "highway overpass intersection aerial . "
+            "expressway and ramp system with no pedestrian access overhead"
+        ),
+        "negative_dino_caption": "sidewalk . plaza . park . garden . residential street . seating . pedestrian area . parking lot . surface lot . courtyard",
+        "negative_box_threshold": 0.40,
+        "negative_text_threshold": 0.36,
+        "box_threshold": 0.08,
+        "text_threshold": 0.06,
+        "keywords": ("highway", "freeway", "lane", "overpass", "interchange", "median", "road", "tarmac", "rail", "no-sidewalk"),
         "negative_keywords": (),
         "min_aspect_ratio": 0.35,
         "max_aspect_ratio": 24.0,
-        "min_box_side_px": 18,
+        "min_box_side_px": 14,
         "max_split_boxes_per_detection": 160,
         "enable_area_split": False,
         "enable_tiled_fallback": True,
         "max_area_meters_sq": 200000,
-        "negative_captions": [],
+        "negative_captions": ["parking lot", "surface lot", "plaza", "courtyard", "sidewalk", "park", "garden", "residential street"],
         "clip_negative_weight": 0.20,
-        "clip_top_k": 80,
-        "clip_score_threshold": -0.20,
-        "clip_relative_score_margin": 0.05,
+        "clip_top_k": 120,
+        "clip_score_threshold": -0.35,
+        "clip_relative_score_margin": 0.08,
         #"clip_min_area_ratio": 0.00005,
         #"clip_max_area_ratio": 0.75,
         "max_saturation": 1.0,

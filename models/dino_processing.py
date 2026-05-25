@@ -1,18 +1,120 @@
 from pathlib import Path
 from time import perf_counter
 import os
-
-import groundingdino
-import groundingdino.datasets.transforms as T
+import types
+import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import requests
 import torch
-from groundingdino.util.inference import load_model, predict
+import torch.nn.functional as F
 from matplotlib.patches import Rectangle
 from PIL import Image
 
 from models import config as cfg
+
+# Add GroundingDINO-main to path to import local checkout
+repo_root = Path(__file__).resolve().parents[1]
+dino_root = repo_root / "GroundingDINO-main"
+if dino_root.exists() and str(dino_root) not in sys.path:
+    sys.path.insert(0, str(dino_root))
+
+
+def _create_groundingdino_fallback_extension() -> types.ModuleType:
+    """Provide a Python fallback for groundingdino._C when the compiled extension is unavailable."""
+
+    fallback_module = types.ModuleType("groundingdino._C")
+
+    def ms_deform_attn_forward(
+        value,
+        value_spatial_shapes,
+        value_level_start_index,
+        sampling_locations,
+        attention_weights,
+        im2col_step,
+    ):
+        bs, _, num_heads, embed_dims = value.shape
+        _, num_queries, _, num_levels, num_points, _ = sampling_locations.shape
+        value_list = value.split([int(h * w) for h, w in value_spatial_shapes], dim=1)
+        sampling_grids = 2 * sampling_locations - 1
+        sampling_value_list = []
+
+        for level, (height, width) in enumerate(value_spatial_shapes):
+            value_level = (
+                value_list[level].flatten(2).transpose(1, 2).reshape(bs * num_heads, embed_dims, int(height), int(width))
+            )
+            sampling_grid_level = sampling_grids[:, :, :, level].transpose(1, 2).flatten(0, 1)
+            sampling_value_level = F.grid_sample(
+                value_level,
+                sampling_grid_level,
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=False,
+            )
+            sampling_value_list.append(sampling_value_level)
+
+        attention_weights = attention_weights.transpose(1, 2).reshape(
+            bs * num_heads, 1, num_queries, num_levels * num_points
+        )
+        output = (
+            (torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights)
+            .sum(-1)
+            .view(bs, num_heads * embed_dims, num_queries)
+        )
+        return output.transpose(1, 2).contiguous()
+
+    def ms_deform_attn_backward(
+        value,
+        value_spatial_shapes,
+        value_level_start_index,
+        sampling_locations,
+        attention_weights,
+        grad_output,
+        im2col_step,
+    ):
+        return (
+            torch.zeros_like(value),
+            torch.zeros_like(sampling_locations),
+            torch.zeros_like(attention_weights),
+        )
+
+    fallback_module.ms_deform_attn_forward = ms_deform_attn_forward
+    fallback_module.ms_deform_attn_backward = ms_deform_attn_backward
+    return fallback_module
+
+
+def _install_groundingdino_extension_fallback() -> None:
+    """Install a Python fallback for groundingdino._C if no compiled extension exists."""
+
+    c_ext_candidates = list(dino_root.glob("groundingdino/_C*.pyd")) + list(dino_root.glob("groundingdino/_C*.so"))
+    if c_ext_candidates:
+        return
+
+    sys.modules.setdefault("groundingdino._C", _create_groundingdino_fallback_extension())
+
+
+_install_groundingdino_extension_fallback()
+
+# Import GroundingDINO
+groundingdino = None
+T = None
+load_model = None
+predict = None
+
+try:
+    import groundingdino  # type: ignore
+    import groundingdino.datasets.transforms as T
+    from groundingdino.util.inference import load_model, predict
+except Exception as e:
+    print(f"[WARN] GroundingDINO imports failed: {e}")
+
+
+def _has_groundingdino_custom_ops() -> bool:
+    """Return True when GroundingDINO functions are available."""
+    return predict is not None and load_model is not None
+
+
+GROUNDINGDINO_CUSTOM_OPS_AVAILABLE = _has_groundingdino_custom_ops()
 
 
 def ensure_download(path: str, urls: list[str]) -> None:
@@ -106,6 +208,19 @@ def _is_box_geometry_valid(
 
 
 def build_dino_model_and_transform(config) -> tuple[object, object, str]:
+    if groundingdino is None or T is None or load_model is None or predict is None:
+        print(
+            "[WARN] GroundingDINO imports are unavailable in the local checkout; "
+            "DINO prompt inference will be skipped and SAM fallback will be used."
+        )
+        return None, None, "cpu"
+
+    if not GROUNDINGDINO_CUSTOM_OPS_AVAILABLE:
+        print(
+            "[WARN] GroundingDINO custom C++ ops are unavailable; "
+            "DINO prompt inference will be skipped and SAM fallback will be used."
+        )
+
     dino_pkg_dir = Path(groundingdino.__file__).resolve().parent
     dino_config_path = dino_pkg_dir / "config" / "GroundingDINO_SwinT_OGC.py"
     dino_checkpoint_path = Path("groundingdino_swint_ogc.pth")
@@ -404,6 +519,22 @@ def run_dino_prompts(
     return_unfiltered: bool = False,
     show_timing_summary: bool = True,
 ) -> list[dict] | tuple[list[dict], list[dict], list[dict]]:
+    if not GROUNDINGDINO_CUSTOM_OPS_AVAILABLE:
+        print(
+            "[WARN] Skipping DINO prompt inference because groundingdino._C is unavailable."
+        )
+        if return_unfiltered:
+            return [], [], []
+        return []
+
+    if predict is None or load_model is None:
+        print(
+            "[WARN] Skipping DINO prompt inference because GroundingDINO functions are unavailable."
+        )
+        if return_unfiltered:
+            return [], [], []
+        return []
+
     print("[INFO] Running prompt-by-prompt DINO detection")
     dino_total_start = perf_counter()
     all_records: list[dict] = []

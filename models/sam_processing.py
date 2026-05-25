@@ -88,6 +88,36 @@ def _expand_box_xyxy(
     return [nx1, ny1, nx2, ny2]
 
 
+def _rank_auto_mask_dict(mask_dict: dict) -> tuple[float, float, float]:
+    """Rank automatic SAM masks by size first, then by SAM quality signals."""
+    return (
+        float(mask_dict.get("area", 0.0)),
+        float(mask_dict.get("predicted_iou", 0.0)),
+        float(mask_dict.get("stability_score", 0.0)),
+    )
+
+
+def _mask_area_pixels(mask_dict: dict) -> int:
+    area = mask_dict.get("area")
+    if area is not None:
+        try:
+            return int(area)
+        except Exception:
+            pass
+
+    seg = mask_dict.get("segmentation")
+    if seg is None:
+        return 0
+    return int(np.asarray(seg).sum())
+
+
+def _passes_sam_mask_filters(mask_dict: dict, config=None) -> bool:
+    min_area_px = int(getattr(config, "sam_min_mask_area_px", 0)) if config is not None else 0
+    if min_area_px > 0 and _mask_area_pixels(mask_dict) < min_area_px:
+        return False
+    return True
+
+
 def generate_sam_masks_from_detections(
     predictor: SamPredictor,
     detections: list[dict],
@@ -141,20 +171,22 @@ def generate_sam_masks_from_detections(
             my0, my1 = int(ys.min()), int(ys.max()) + 1
             mx0, mx1 = int(xs.min()), int(xs.max()) + 1
             local_seg = full_seg[my0:my1, mx0:mx1]
+            candidate = {
+                "segmentation": local_seg,
+                "tile_bounds": (my0 + origin_y, my1 + origin_y, mx0 + origin_x, mx1 + origin_x),
+                "full_shape": target_full_shape,
+                "predicted_iou": float(scores[0]),
+                "stability_score": float(scores[0]),
+                "bbox": [x1 + origin_x, y1 + origin_y, x2 - x1, y2 - y1],
+                "dino_phrase": phrase,
+                "dino_prompt_group": prompt_group,
+                "dino_score": float(rec["score"]),
+            }
 
-            masks.append(
-                {
-                    "segmentation": local_seg,
-                    "tile_bounds": (my0 + origin_y, my1 + origin_y, mx0 + origin_x, mx1 + origin_x),
-                    "full_shape": target_full_shape,
-                    "predicted_iou": float(scores[0]),
-                    "stability_score": float(scores[0]),
-                    "bbox": [x1 + origin_x, y1 + origin_y, x2 - x1, y2 - y1],
-                    "dino_phrase": phrase,
-                    "dino_prompt_group": prompt_group,
-                    "dino_score": float(rec["score"]),
-                }
-            )
+            if not _passes_sam_mask_filters(candidate, config):
+                continue
+
+            masks.append(candidate)
         except Exception as exc:
             print(f"[WARN] SAM failed on box {i}: {exc}")
 
@@ -186,11 +218,21 @@ def generate_sam_masks_automatic(
     )
     
     auto_masks = mask_generator.generate(image)
+    max_total_masks = int(getattr(config, "sam_auto_max_total_masks", 0))
+    if max_total_masks > 0 and len(auto_masks) > max_total_masks:
+        original_count = len(auto_masks)
+        auto_masks = sorted(auto_masks, key=_rank_auto_mask_dict, reverse=True)[:max_total_masks]
+        print(
+            f"[INFO] SAM automatic masks capped globally from {original_count:,} to {len(auto_masks):,} masks"
+        )
     
     masks: list[dict] = []
     origin_y, origin_x = tile_origin
     target_full_shape = full_shape if full_shape is not None else image.shape[:2]
     for i, mask_dict in enumerate(auto_masks):
+        if not _passes_sam_mask_filters(mask_dict, config):
+            continue
+
         masks.append(
             {
                 "segmentation": mask_dict["segmentation"],
@@ -265,6 +307,9 @@ def generate_sam_masks_automatic_tiled(
             if not np.any(seg):
                 continue
 
+            if not _passes_sam_mask_filters(mask_dict, config):
+                continue
+
             bx, by, bw, bh = mask_dict.get("bbox", [0, 0, tile_w, tile_h])
             masks.append(
                 {
@@ -287,12 +332,13 @@ def generate_sam_masks_automatic_tiled(
                 f"masks so far: {len(masks)}"
             )
 
-        if len(masks) >= max_total_masks:
-            print(
-                f"[INFO] Stopping tiled auto SAM early at tile {tile_idx}/{len(tile_coords)} "
-                f"after reaching {len(masks)} masks"
-            )
-            break
+    if max_total_masks > 0 and len(masks) > max_total_masks:
+        print(
+            f"[INFO] Trimming tiled auto SAM results globally from {len(masks)} to {max_total_masks} masks"
+        )
+
+        masks.sort(key=_rank_auto_mask_dict, reverse=True)
+        masks = masks[:max_total_masks]
 
     print(f"[INFO] Generated {len(masks)} masks from tiled automatic SAM")
     return masks

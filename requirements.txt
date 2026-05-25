@@ -6,3 +6,7 @@ contextily
 scikit-learn
 scikit-image
 opencv-contrib-python
+torchaudio
+git+https://github.com/IDEA-Research/GroundingDINO.git
+transformers<5
+huggingface_hub<1.0

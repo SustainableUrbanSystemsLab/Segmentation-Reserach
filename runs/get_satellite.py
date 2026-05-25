@@ -7,6 +7,9 @@ import sys
 from time import perf_counter
 import warnings
 
+# Reduce noisy cache warnings on Windows where symlinks are often unavailable.
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -57,6 +60,21 @@ if getattr(cfg, "dino_suppress_low_risk_warnings", False):
     warnings.filterwarnings(
         "ignore",
         message=r"`torch\.cuda\.amp\.autocast\(args\.\.\.\)` is deprecated\..*",
+        category=FutureWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Failed to load custom C\+\+ ops\. Running on CPU mode Only!",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"torch\.meshgrid: in an upcoming release, it will be required to pass the indexing argument\..*",
+        category=UserWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"You are using `torch\.load` with `weights_only=False`.*",
         category=FutureWarning,
     )
     try:
@@ -279,12 +297,110 @@ def get_cache_key_for_tile_masks(image_path: str, image_hash: str, tile_idx: int
     return f"{stem}_hash{image_hash}_tile{tile_idx}-of-{tile_count}_masks.pkl"
 
 
+def get_cache_key_for_region_context_scoring(image_path: str, image_hash: str, prompt_signature: str) -> str:
+    """Generate cache key for region-context CLIP scoring output."""
+    stem = Path(image_path).stem
+    return f"{stem}_hash{image_hash}_regionctx_{prompt_signature}.pkl"
+
+
 def compute_image_hash(img_array: np.ndarray) -> str:
     """Compute a quick hash of image array to detect if image changed."""
     import hashlib
     # Only hash shape and first/last pixel values to keep it fast
     hash_input = f"{img_array.shape}_{img_array.dtype}_{img_array[0,0].tobytes()}_{img_array[-1,-1].tobytes()}"
     return hashlib.md5(hash_input.encode()).hexdigest()[:8]
+
+
+def build_region_context_prompt_signature(prompt_configs: list[dict]) -> str:
+    """Build a stable signature for the prompt scoring recipe used by region-context mode."""
+    import hashlib
+    import json
+
+    signature_payload = []
+    for prompt_config in prompt_configs:
+        signature_payload.append(
+            {
+                "name": prompt_config.get("name"),
+                "caption": prompt_config.get("caption"),
+                "negative_captions": list(prompt_config.get("negative_captions", [])),
+                "clip_negative_weight": float(prompt_config.get("clip_negative_weight", 0.0)),
+                "clip_min_area_ratio": float(prompt_config.get("clip_min_area_ratio", 0.0)),
+                "clip_max_area_ratio": float(prompt_config.get("clip_max_area_ratio", 1.0)),
+                "max_saturation": float(prompt_config.get("max_saturation", 1.0)),
+                "min_value": float(prompt_config.get("min_value", 0.0)),
+            }
+        )
+
+    signature_text = json.dumps(signature_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(signature_text.encode("utf-8")).hexdigest()[:12]
+
+
+def save_region_context_scoring_cache(
+    image_path: str,
+    image_hash: str,
+    file_context: str,
+    region_context_masks: list[dict],
+    total_scored_masks: int,
+    prompt_signature: str,
+) -> bool:
+    """Save region-context CLIP scoring outputs to cache."""
+    if not bool(getattr(cfg, "enable_pipeline_caching", True)):
+        return False
+    if not region_context_masks:
+        return False
+
+    try:
+        cache_dir = get_cache_dir()
+        cache_file = cache_dir / file_context
+        with open(cache_file, "wb") as f:
+            pickle.dump(
+                {
+                    "prompt_signature": prompt_signature,
+                    "total_scored_masks": int(total_scored_masks),
+                    "region_context_masks": region_context_masks,
+                },
+                f,
+            )
+        print(f"[INFO] Cached region-context scoring results: {cache_file.name}")
+        return True
+    except Exception as exc:
+        print(f"[WARN] Failed to save region-context scoring cache: {exc}")
+        return False
+
+
+def load_region_context_scoring_cache(
+    image_path: str,
+    image_hash: str,
+    file_context: str,
+    prompt_signature: str,
+) -> list[dict] | None:
+    """Load region-context CLIP scoring outputs from cache."""
+    if not bool(getattr(cfg, "enable_pipeline_caching", True)):
+        return None
+    if bool(getattr(cfg, "overwrite_pipeline_cache", False)):
+        return None
+
+    try:
+        cache_dir = get_cache_dir()
+        cache_file = cache_dir / file_context
+        if not cache_file.exists():
+            return None
+
+        with open(cache_file, "rb") as f:
+            data = pickle.load(f)
+        if data.get("prompt_signature") != prompt_signature:
+            print(f"[INFO] Ignoring region-context cache with mismatched prompt signature: {cache_file.name}")
+            return None
+
+        region_context_masks = data.get("region_context_masks")
+        if not isinstance(region_context_masks, list) or not region_context_masks:
+            return None
+
+        print(f"[INFO] Loaded region-context scoring cache: {cache_file.name}")
+        return region_context_masks
+    except Exception as exc:
+        print(f"[WARN] Failed to load region-context scoring cache: {exc}")
+        return None
 
 
 def save_dino_cache(image_path: str, image_hash: str, dino_records: list | None, file_context: str) -> bool:
@@ -501,6 +617,55 @@ def expand_mask_to_full_image(mask_dict: dict) -> np.ndarray:
     return full_seg
 
 
+def _get_chunk_size_px() -> int:
+    return int(getattr(cfg, "contrastive_assignment_chunk_px", getattr(cfg, "sam_auto_tile_size_px", 1200)))
+
+
+def _update_score_map_from_mask(
+    score_map: np.ndarray,
+    mask_dict: dict,
+    score: float,
+    chunk_y0: int,
+    chunk_x0: int,
+) -> None:
+    if "tile_bounds" in mask_dict:
+        ty0, ty1, tx0, tx1 = mask_dict["tile_bounds"]
+        y0 = max(chunk_y0, int(ty0))
+        y1 = min(chunk_y0 + score_map.shape[0], int(ty1))
+        x0 = max(chunk_x0, int(tx0))
+        x1 = min(chunk_x0 + score_map.shape[1], int(tx1))
+        if y0 >= y1 or x0 >= x1:
+            return
+
+        seg_y0 = y0 - int(ty0)
+        seg_y1 = seg_y0 + (y1 - y0)
+        seg_x0 = x0 - int(tx0)
+        seg_x1 = seg_x0 + (x1 - x0)
+        seg = mask_dict["segmentation"][seg_y0:seg_y1, seg_x0:seg_x1]
+        local_y0 = y0 - chunk_y0
+        local_y1 = y1 - chunk_y0
+        local_x0 = x0 - chunk_x0
+        local_x1 = x1 - chunk_x0
+        local_view = score_map[local_y0:local_y1, local_x0:local_x1]
+        update_pixels = seg & (score > local_view)
+        if np.any(update_pixels):
+            local_view[update_pixels] = score
+        return
+
+    seg = mask_dict["segmentation"]
+    local_y0 = max(0, chunk_y0)
+    local_x0 = max(0, chunk_x0)
+    local_y1 = min(score_map.shape[0], seg.shape[0])
+    local_x1 = min(score_map.shape[1], seg.shape[1])
+    if local_y0 >= local_y1 or local_x0 >= local_x1:
+        return
+    seg_view = seg[local_y0:local_y1, local_x0:local_x1]
+    local_view = score_map[local_y0:local_y1, local_x0:local_x1]
+    update_pixels = seg_view & (score > local_view)
+    if np.any(update_pixels):
+        local_view[update_pixels] = score
+
+
 PIPELINE_STAGE_TOTAL = 6
 log_image_stage(f"Preparing image '{Path(active_tif_file).name}'", 1, PIPELINE_STAGE_TOTAL)
 
@@ -534,7 +699,8 @@ else:
     else:
         img_model = normalize_to_uint8(img_raw)
 
-img_display = normalize_to_uint8(img_raw.copy()) if img_raw.dtype != np.uint8 else img_raw.copy()
+img_display = img_model if img_raw.dtype == np.uint8 else normalize_to_uint8(img_raw)
+del img_raw
 print(
     f"[INFO] Model image shape: {img_model.shape[0]}x{img_model.shape[1]} "
     f"({img_model.shape[2]} channels), dtype={img_model.dtype}"
@@ -1074,7 +1240,7 @@ def batch_score_masks_clip(
     min_area = prompt_config.get("clip_min_area_ratio", 0.00015)
     max_area = prompt_config.get("clip_max_area_ratio", 0.25)
     
-    candidates: list[tuple[int, np.ndarray]] = []  # (orig_idx, pil_img_tensor)
+    candidates: list[tuple[int, int, int, int, int, int, int, int, int, int, float, float, np.ndarray, int, int, dict]] = []
     
     for idx, m in enumerate(masks_input):
         geom = _extract_mask_geometry(m)
@@ -1091,68 +1257,70 @@ def batch_score_masks_clip(
         
         # Prepare crop
         tile_seg = m["segmentation"]
-        crop = img_model[iy0:iy1, ix0:ix1]
-        crop_mask = tile_seg[ly0:ly1, lx0:lx1][..., None]
-        object_only = np.where(crop_mask, crop, 255).astype(np.uint8)
-        pil_img = Image.fromarray(object_only)
-        img_tensor = clip_preprocess(pil_img)
-        
-        candidates.append((idx, img_tensor, iy0, iy1, ix0, ix1, ly0, ly1, lx0, lx1, h, w, area_ratio, bbox_fill, tile_seg, full_h, full_w, m))
+        candidates.append((idx, iy0, iy1, ix0, ix1, ly0, ly1, lx0, lx1, h, w, area_ratio, bbox_fill, tile_seg, full_h, full_w, m))
     
     if not candidates:
         return scores
     
-    # Batch CLIP encoding
-    batch_indices = [c[0] for c in candidates]
-    batch_tensors = torch.stack([c[1] for c in candidates]).to(clip_device)
-    
-    with torch.no_grad():
-        batch_features = clip_model.encode_image(batch_tensors)
-        batch_features = batch_features / batch_features.norm(dim=-1, keepdim=True)
-    
-    # Unbatch results and compute scores
     neg_weight = float(prompt_config.get("clip_negative_weight", 0.35))
-    
-    for batch_idx, (orig_idx, _, iy0, iy1, ix0, ix1, ly0, ly1, lx0, lx1, h, w, area_ratio, bbox_fill, tile_seg, full_h, full_w, m) in enumerate(candidates):
-        image_features = batch_features[batch_idx:batch_idx+1]
-        
-        # CLIP scores
-        pos_sim = float((image_features @ pos_text_feature.T).item())
-        score = pos_sim
-        
-        if neg_text_feature is not None:
-            neg_sim = float((image_features @ neg_text_feature.T).item())
-            score -= neg_weight * max(0.0, neg_sim)
-        
-        # Geometry bonuses
-        iou = float(m.get("predicted_iou", 0.0))
-        stability = float(m.get("stability_score", 0.0))
-        score += 0.05 * iou + 0.05 * stability 
-        
-        aspect = max(h, w) / float(min(h, w))
-        elongation_score = np.clip((aspect - 1.5) / 6.0, 0.0, 1.0)
-        sparse_fill_score = np.clip((0.65 - bbox_fill) / 0.65, 0.0, 1.0)
-        score += 0.12 * float(elongation_score)
-        score += 0.06 * float(sparse_fill_score)
-        
-        # Color bonuses
-        mask_pixels = img_model[iy0:iy1, ix0:ix1][tile_seg[ly0:ly1, lx0:lx1]]
-        if mask_pixels.size > 0:
-            pixels_norm = mask_pixels.astype(np.float32) / 255.0
-            hsv = rgb_to_hsv(pixels_norm.reshape(-1, 1, 3)).reshape(-1, 3)
-            sat = float(hsv[:, 1].mean())
-            val = float(hsv[:, 2].mean())
-            
-            max_sat = prompt_config.get("max_saturation", 0.28)
-            min_val = prompt_config.get("min_value", 0.35)
-            
-            low_sat_score = np.clip((max_sat - sat) / max_sat, 0.0, 1.0)
-            bright_enough_score = np.clip((val - min_val) / (1.0 - min_val), 0.0, 1.0)
-            
-            score += 0.05 * float(low_sat_score)
-            score += 0.04 * float(bright_enough_score)
-        
-        scores[orig_idx] = score
+    batch_size = max(1, int(prompt_config.get("clip_batch_size", getattr(cfg, "clip_batch_size", 16))))
+
+    for start_idx in range(0, len(candidates), batch_size):
+        batch_slice = candidates[start_idx : start_idx + batch_size]
+        batch_tensors = []
+        for (_, iy0, iy1, ix0, ix1, ly0, ly1, lx0, lx1, h, w, area_ratio, bbox_fill, tile_seg, full_h, full_w, m) in batch_slice:
+            crop = img_model[iy0:iy1, ix0:ix1]
+            crop_mask = tile_seg[ly0:ly1, lx0:lx1][..., None]
+            object_only = np.where(crop_mask, crop, 255).astype(np.uint8)
+            pil_img = Image.fromarray(object_only)
+            batch_tensors.append(clip_preprocess(pil_img))
+
+        batch_tensor = torch.stack(batch_tensors).to(clip_device)
+
+        with torch.no_grad():
+            batch_features = clip_model.encode_image(batch_tensor)
+            batch_features = batch_features / batch_features.norm(dim=-1, keepdim=True)
+
+        for local_idx, (orig_idx, iy0, iy1, ix0, ix1, ly0, ly1, lx0, lx1, h, w, area_ratio, bbox_fill, tile_seg, full_h, full_w, m) in enumerate(batch_slice):
+            image_features = batch_features[local_idx : local_idx + 1]
+
+            pos_sim = float((image_features @ pos_text_feature.T).item())
+            score = pos_sim
+
+            if neg_text_feature is not None:
+                neg_sim = float((image_features @ neg_text_feature.T).item())
+                score -= neg_weight * max(0.0, neg_sim)
+
+            iou = float(m.get("predicted_iou", 0.0))
+            stability = float(m.get("stability_score", 0.0))
+            score += 0.05 * iou + 0.05 * stability
+
+            aspect = max(h, w) / float(min(h, w))
+            elongation_score = np.clip((aspect - 1.5) / 6.0, 0.0, 1.0)
+            sparse_fill_score = np.clip((0.65 - bbox_fill) / 0.65, 0.0, 1.0)
+            score += 0.12 * float(elongation_score)
+            score += 0.06 * float(sparse_fill_score)
+
+            mask_pixels = img_model[iy0:iy1, ix0:ix1][tile_seg[ly0:ly1, lx0:lx1]]
+            if mask_pixels.size > 0:
+                pixels_norm = mask_pixels.astype(np.float32) / 255.0
+                hsv = rgb_to_hsv(pixels_norm.reshape(-1, 1, 3)).reshape(-1, 3)
+                sat = float(hsv[:, 1].mean())
+                val = float(hsv[:, 2].mean())
+
+                max_sat = prompt_config.get("max_saturation", 0.28)
+                min_val = prompt_config.get("min_value", 0.35)
+
+                low_sat_score = np.clip((max_sat - sat) / max_sat, 0.0, 1.0)
+                bright_enough_score = np.clip((val - min_val) / (1.0 - min_val), 0.0, 1.0)
+
+                score += 0.05 * float(low_sat_score)
+                score += 0.04 * float(bright_enough_score)
+
+            scores[orig_idx] = score
+
+        del batch_tensor
+        del batch_features
     
     return scores
 
@@ -1176,16 +1344,15 @@ def serial_score_masks_clip(
     return scores
 
 
-def select_masks_for_prompt(
+def score_masks_for_prompt(
     masks_input: list,
     score_key: str,
     pos_text_feature: torch.Tensor,
     neg_text_feature: torch.Tensor | None,
     prompt_name: str,
     prompt_config: dict,
-) -> tuple[list, float]:
+) -> list:
     stage_start = perf_counter()
-    print(f"[INFO] Scoring {len(masks_input)} masks for '{prompt_name}'")
 
     # Use batch CLIP scoring for ~2-4x speedup, but fall back to serial scoring if needed.
     try:
@@ -1202,16 +1369,32 @@ def select_masks_for_prompt(
             import traceback
             traceback.print_exc()
             print(f"[ERROR] No CLIP scoring method worked for '{prompt_name}'; skipping prompt")
-            return [], float(prompt_config.get("clip_score_threshold", -0.03))
+            return []
     
     for idx, score in enumerate(scores):
         masks_input[idx][score_key] = score
-        if (idx + 1) == 1 or (idx + 1) % 50 == 0 or (idx + 1) == len(masks_input):
-            print(
-                f"[PROGRESS] [{prompt_name}] Scored {idx + 1}/{len(masks_input)} masks"
-            )
 
     log_stage(f"Mask scoring complete for '{prompt_name}'", stage_start)
+
+    return masks_input
+
+
+def select_masks_for_prompt(
+    masks_input: list,
+    score_key: str,
+    pos_text_feature: torch.Tensor,
+    neg_text_feature: torch.Tensor | None,
+    prompt_name: str,
+    prompt_config: dict,
+) -> tuple[list, float]:
+    masks_input = score_masks_for_prompt(
+        masks_input,
+        score_key,
+        pos_text_feature,
+        neg_text_feature,
+        prompt_name,
+        prompt_config,
+    )
 
     filtered = [m for m in masks_input if m[score_key] >= 0.0]
     filtered.sort(key=lambda m: m[score_key], reverse=True)
@@ -1235,18 +1418,241 @@ def select_masks_for_prompt(
     if not selected and filtered:
         selected = filtered[:1]
 
-    print(f"Prompt: {prompt_name}")
-    print(f"Selection threshold used: {dynamic_threshold:.3f}")
-    print(f"Selected {len(selected)} / {len(masks_input)} masks by CLIP score")
-    print("Top scores:", ", ".join(f"{m[score_key]:.3f}" for m in selected[:5]))
-
     return selected, dynamic_threshold
+
+
+def select_masks_for_prompt_contrastive(
+    masks_input: list,
+    score_key: str,
+    pos_text_feature: torch.Tensor,
+    neg_text_feature: torch.Tensor | None,
+    prompt_name: str,
+    prompt_config: dict,
+) -> list:
+    scored_masks = score_masks_for_prompt(
+        masks_input,
+        score_key,
+        pos_text_feature,
+        neg_text_feature,
+        prompt_name,
+        prompt_config,
+    )
+    return scored_masks
+
+
+def _assign_region_context_masks(
+    scored_masks: list[dict],
+    prompt_names_ordered: list[str],
+    prompt_weights: dict[str, float] | None = None,
+) -> dict[str, list[dict]]:
+    prompt_weights = prompt_weights or {}
+    assigned_masks: dict[str, list[dict]] = {prompt_name: [] for prompt_name in prompt_names_ordered}
+
+    for mask_dict in scored_masks:
+        best_prompt_name: str | None = None
+        best_score = float("-inf")
+        for prompt_name in prompt_names_ordered:
+            score_key = f"clip_score_{prompt_name}"
+            score = float(mask_dict.get(score_key, mask_dict.get("score", float("-inf"))))
+            weighted_score = score * float(prompt_weights.get(prompt_name, 1.0))
+            if weighted_score > best_score:
+                best_score = weighted_score
+                best_prompt_name = prompt_name
+
+        if best_prompt_name is not None:
+            assigned_masks[best_prompt_name].append(mask_dict)
+
+    total_assigned = sum(len(v) for v in assigned_masks.values())
+    print(f"[INFO] Region-context assignment complete: assigned {total_assigned} SAM regions")
+    for prompt_name in prompt_names_ordered:
+        print(f"[INFO]   {prompt_name}: {len(assigned_masks[prompt_name]):,} regions")
+
+    return assigned_masks
+
+
+def _build_region_context_full_image_masks(
+    selected_masks_by_prompt: dict[str, list[dict]],
+    image_shape: tuple[int, int],
+    prompt_names_ordered: list[str],
+) -> dict[str, np.ndarray]:
+    """Build full-image masks from region-context prompt assignments in one pass."""
+    h, w = image_shape
+    full_image_masks: dict[str, np.ndarray] = {
+        prompt_name: np.zeros((h, w), dtype=bool) for prompt_name in prompt_names_ordered
+    }
+
+    total_regions = 0
+    for prompt_name in prompt_names_ordered:
+        prompt_regions = selected_masks_by_prompt.get(prompt_name, [])
+        prompt_mask = full_image_masks[prompt_name]
+        prompt_region_count = 0
+        for mask in prompt_regions:
+            # More memory-efficient: if this mask is a tiled segmentation, OR the
+            # small tile slice directly into the full-image mask instead of
+            # allocating a full-size boolean array for every region.
+            try:
+                if "tile_bounds" in mask:
+                    ty0, ty1, tx0, tx1 = mask["tile_bounds"]
+                    seg = mask.get("segmentation")
+                    if seg is None:
+                        continue
+                    # Validate shapes
+                    th = int(ty1) - int(ty0)
+                    tw = int(tx1) - int(tx0)
+                    if seg.shape[0] == th and seg.shape[1] == tw:
+                        if np.any(seg):
+                            prompt_mask[ty0:ty1, tx0:tx1] |= seg
+                        else:
+                            # empty segment
+                            pass
+                    else:
+                        # Fallback to expansion if shapes don't match
+                        region_mask = expand_mask_to_full_image(mask)
+                        if np.any(region_mask):
+                            prompt_mask |= region_mask
+                else:
+                    seg = mask.get("segmentation")
+                    if seg is None:
+                        continue
+                    if seg.shape == prompt_mask.shape:
+                        if np.any(seg):
+                            prompt_mask |= seg
+                    else:
+                        region_mask = expand_mask_to_full_image(mask)
+                        if np.any(region_mask):
+                            prompt_mask |= region_mask
+            except Exception as exc:
+                print(f"[WARN] Region-context mask merge failed for one region: {exc}")
+                continue
+            total_regions += 1
+            prompt_region_count += 1
+        print(f"[INFO] Region-context mask build: {prompt_name} -> {prompt_region_count:,} regions")
+
+    print(f"[INFO] Region-context full-image masks built from {total_regions:,} regions")
+
+    coverage_union = np.zeros((h, w), dtype=bool)
+    prompt_index_map = np.zeros((h, w), dtype=np.uint8)
+    for prompt_idx, prompt_name in enumerate(prompt_names_ordered):
+        mask = full_image_masks[prompt_name]
+        coverage_union |= mask
+        prompt_index_map[mask] = np.uint8(prompt_idx)
+
+    if not np.all(coverage_union) and np.any(coverage_union):
+        uncovered_count = int((~coverage_union).sum())
+        print(
+            f"[INFO] Region-context fill: assigning {uncovered_count:,} uncovered pixels to nearest prompt region"
+        )
+        from scipy.ndimage import distance_transform_edt
+
+        _, indices = distance_transform_edt(~coverage_union, return_indices=True)
+        prompt_index_map = prompt_index_map[tuple(indices)]
+
+        full_image_masks = {
+            prompt_name: (prompt_index_map == np.uint8(prompt_idx))
+            for prompt_idx, prompt_name in enumerate(prompt_names_ordered)
+        }
+
+    elif not np.any(coverage_union):
+        print("[WARN] Region-context produced no coverage; leaving masks empty")
+
+    return full_image_masks
+
+
+def _fill_full_image_mask_gaps(
+    combined_masks: dict[str, np.ndarray],
+    image_shape: tuple[int, int],
+    prompt_names_ordered: list[str],
+) -> dict[str, np.ndarray]:
+    """Ensure every pixel is assigned to some prompt by filling gaps from the nearest label."""
+    h, w = image_shape
+    filled_masks: dict[str, np.ndarray] = {
+        prompt_name: np.asarray(combined_masks.get(prompt_name, np.zeros((h, w), dtype=bool)), dtype=bool)
+        for prompt_name in prompt_names_ordered
+    }
+
+    coverage_union = np.zeros((h, w), dtype=bool)
+    prompt_index_map = np.zeros((h, w), dtype=np.uint8)
+    for prompt_idx, prompt_name in enumerate(prompt_names_ordered):
+        mask = filled_masks[prompt_name]
+        coverage_union |= mask
+        prompt_index_map[mask] = np.uint8(prompt_idx)
+
+    if np.all(coverage_union):
+        return filled_masks
+
+    if not np.any(coverage_union):
+        print("[WARN] No prompt masks cover any pixels; returning empty masks")
+        return filled_masks
+
+    uncovered_count = int((~coverage_union).sum())
+    print(f"[INFO] Filling {uncovered_count:,} uncovered pixels from nearest prompt region")
+
+    from scipy.ndimage import distance_transform_edt
+
+    _, indices = distance_transform_edt(~coverage_union, return_indices=True)
+    nearest_prompt_indices = prompt_index_map[tuple(indices)]
+
+    return {
+        prompt_name: (nearest_prompt_indices == np.uint8(prompt_idx))
+        for prompt_idx, prompt_name in enumerate(prompt_names_ordered)
+    }
+
+
+def _apply_coarse_to_fine_pass(
+    combined_masks: dict[str, np.ndarray],
+    image_shape: tuple[int, int],
+    prompt_names_ordered: list[str],
+    cell_px: int,
+    majority_threshold: float = 0.65,
+) -> dict[str, np.ndarray]:
+    """Smooth the final label map by snapping confident coarse cells to one label."""
+    if cell_px <= 1:
+        return combined_masks
+
+    h, w = image_shape
+    if not prompt_names_ordered:
+        return combined_masks
+
+    label_map = np.zeros((h, w), dtype=np.uint8)
+    for prompt_idx, prompt_name in enumerate(prompt_names_ordered):
+        mask = np.asarray(combined_masks.get(prompt_name, np.zeros((h, w), dtype=bool)), dtype=bool)
+        label_map[mask] = np.uint8(prompt_idx)
+
+    smoothed_map = label_map.copy()
+    confident_cells = 0
+    total_cells = 0
+
+    for y0 in range(0, h, cell_px):
+        y1 = min(h, y0 + cell_px)
+        for x0 in range(0, w, cell_px):
+            x1 = min(w, x0 + cell_px)
+            cell = label_map[y0:y1, x0:x1]
+            total_cells += 1
+            counts = np.bincount(cell.ravel(), minlength=len(prompt_names_ordered))
+            winner_idx = int(np.argmax(counts))
+            winner_fraction = float(counts[winner_idx]) / float(cell.size)
+            if winner_fraction >= majority_threshold:
+                smoothed_map[y0:y1, x0:x1] = np.uint8(winner_idx)
+                confident_cells += 1
+
+    print(
+        f"[INFO] Coarse-to-fine smoothing: snapped {confident_cells:,}/{total_cells:,} cells "
+        f"at cell size {cell_px}px"
+    )
+
+    return {
+        prompt_name: (smoothed_map == np.uint8(prompt_idx))
+        for prompt_idx, prompt_name in enumerate(prompt_names_ordered)
+    }
 
 
 selected_masks_by_prompt = {}
 auto_fallback_masks = [m for m in masks if m.get("dino_prompt_group") in (None, "auto")]
 prompt_linked_masks = [m for m in masks if m.get("dino_prompt_group") not in (None, "auto")]
 is_auto_mask_run = len(prompt_linked_masks) == 0
+pixel_assignment_mode = str(getattr(cfg, "pixel_assignment_mode", "legacy")).strip().lower()
+prompt_order = list(cfg.dino_prompt_configs) if hasattr(cfg, "dino_prompt_configs") else []
+prompt_names_ordered = [p["name"] for p in prompt_order]
 
 if is_auto_mask_run:
     print(
@@ -1254,46 +1660,119 @@ if is_auto_mask_run:
         "independent prompt candidate pools before CLIP scoring"
     )
 
-for prompt_name, features in clip_features.items():
-    if is_auto_mask_run:
-        # In SAM-only mode, each prompt evaluates an independent copy of the auto-SAM pool.
-        # This keeps prompt scoring isolated even though mask geometry came from one SAM run.
-        prompt_masks = [{**m, "dino_prompt_group": prompt_name} for m in auto_fallback_masks]
-        print(
-            f"[INFO] Prompt '{prompt_name}' evaluating {len(prompt_masks)} independent SAM-only candidates"
-        )
-    else:
-        # In DINO-guided mode, keep strict prompt isolation from DINO group labels.
-        prompt_masks = [m for m in masks if m.get("dino_prompt_group") == prompt_name]
-        if auto_fallback_masks:
-            prompt_masks.extend({**m, "dino_prompt_group": prompt_name} for m in auto_fallback_masks)
-        if not prompt_masks:
-            print(
-                f"[WARN] No SAM masks linked to prompt '{prompt_name}'; selecting 0 masks for this prompt."
-            )
-            selected_masks_by_prompt[prompt_name] = []
-            continue
-        print(
-            f"[INFO] Prompt '{prompt_name}' evaluating {len(prompt_masks)} prompt-linked SAM masks"
-        )
-
-    selected, _ = select_masks_for_prompt(
-        prompt_masks,
-        f"clip_score_{prompt_name}",
-        features["pos"],
-        features["neg"],
-        prompt_name,
-        features["config"],
+total_scored_masks = 0
+region_context_masks: list[dict] | None = None
+region_context_prompt_signature = build_region_context_prompt_signature(prompt_order)
+region_context_cache_key = get_cache_key_for_region_context_scoring(
+    active_tif_file,
+    image_hash,
+    region_context_prompt_signature,
+)
+cached_region_context_masks: list[dict] | None = None
+if pixel_assignment_mode == "region_context":
+    cached_region_context_masks = load_region_context_scoring_cache(
+        active_tif_file,
+        image_hash,
+        region_context_cache_key,
+        region_context_prompt_signature,
     )
-    selected_masks_by_prompt[prompt_name] = selected
 
-# Compute combined masks for each prompt
-combined_masks = {}
-for prompt_name, selected_masks in selected_masks_by_prompt.items():
-    combined = np.zeros(img_model.shape[:2], dtype=bool)
-    for m in selected_masks:
-        combined |= expand_mask_to_full_image(m)
-    combined_masks[prompt_name] = combined
+if cached_region_context_masks is not None:
+    region_context_masks = cached_region_context_masks
+    total_scored_masks = len(region_context_masks)
+    print(
+        f"[INFO] Using cached region-context CLIP scores ({total_scored_masks} shared SAM regions)"
+    )
+
+if cached_region_context_masks is None:
+    for prompt_name, features in clip_features.items():
+        if pixel_assignment_mode == "region_context":
+            if region_context_masks is None:
+                region_context_masks = [{**m} for m in masks]
+            prompt_masks = region_context_masks
+            total_scored_masks += len(prompt_masks)
+            print(
+                f"[INFO] Prompt '{prompt_name}' evaluating {len(prompt_masks)} shared SAM regions"
+            )
+        elif is_auto_mask_run:
+            # In SAM-only mode, each prompt evaluates an independent copy of the auto-SAM pool.
+            # This keeps prompt scoring isolated even though mask geometry came from one SAM run.
+            prompt_masks = [{**m, "dino_prompt_group": prompt_name} for m in auto_fallback_masks]
+            # prompt evaluates an independent copy of auto masks
+            total_scored_masks += len(prompt_masks)
+            print(
+                f"[INFO] Prompt '{prompt_name}' evaluating {len(prompt_masks)} independent SAM-only candidates"
+            )
+        if is_auto_mask_run:
+            pass
+        elif pixel_assignment_mode != "region_context":
+            # In DINO-guided mode, keep strict prompt isolation from DINO group labels.
+            prompt_masks = [m for m in masks if m.get("dino_prompt_group") == prompt_name]
+            if auto_fallback_masks:
+                prompt_masks.extend({**m, "dino_prompt_group": prompt_name} for m in auto_fallback_masks)
+            if not prompt_masks:
+                print(
+                    f"[WARN] No SAM masks linked to prompt '{prompt_name}'; selecting 0 masks for this prompt."
+                )
+                selected_masks_by_prompt[prompt_name] = []
+                continue
+            total_scored_masks += len(prompt_masks)
+            print(
+                f"[INFO] Prompt '{prompt_name}' evaluating {len(prompt_masks)} prompt-linked SAM masks"
+            )
+
+        if pixel_assignment_mode in {"contrastive", "region_context"}:
+            selected_masks_by_prompt[prompt_name] = select_masks_for_prompt_contrastive(
+                prompt_masks,
+                f"clip_score_{prompt_name}",
+                features["pos"],
+                features["neg"],
+                prompt_name,
+                features["config"],
+            )
+        else:
+            selected, _ = select_masks_for_prompt(
+                prompt_masks,
+                f"clip_score_{prompt_name}",
+                features["pos"],
+                features["neg"],
+                prompt_name,
+                features["config"],
+            )
+            selected_masks_by_prompt[prompt_name] = selected
+
+    if pixel_assignment_mode == "region_context" and region_context_masks is not None:
+        save_region_context_scoring_cache(
+            active_tif_file,
+            image_hash,
+            region_context_cache_key,
+            region_context_masks,
+            total_scored_masks,
+            region_context_prompt_signature,
+        )
+
+if pixel_assignment_mode == "region_context":
+    contrastive_prompt_weights = dict(getattr(cfg, "contrastive_prompt_weights", {}))
+    selected_masks_by_prompt = _assign_region_context_masks(
+        region_context_masks or [],
+        prompt_names_ordered,
+        contrastive_prompt_weights,
+    )
+    combined_masks = _build_region_context_full_image_masks(
+        selected_masks_by_prompt,
+        img_model.shape[:2],
+        prompt_names_ordered,
+    )
+    print("[INFO] Region-context scoring, assignment, and mask build finished")
+
+# Compute combined masks for each prompt (legacy/thresholded paths only).
+if pixel_assignment_mode not in {"contrastive", "region_context"}:
+    combined_masks = {}
+    for prompt_name, selected_masks in selected_masks_by_prompt.items():
+        combined = np.zeros(img_model.shape[:2], dtype=bool)
+        for m in selected_masks:
+            combined |= expand_mask_to_full_image(m)
+        combined_masks[prompt_name] = combined
 
 
 def _apply_tier_thresholds(
@@ -1302,6 +1781,8 @@ def _apply_tier_thresholds(
     image_shape: tuple[int, int],
     e_threshold: float = 0.25,
     c_threshold: float = 0.15,
+    d_threshold: float = 0.0,
+    b_threshold: float = 0.0,
 ) -> dict[str, np.ndarray]:
     """Apply confidence thresholds to tier assignments.
     
@@ -1321,10 +1802,12 @@ def _apply_tier_thresholds(
     """
     h, w = image_shape
     
-    # Build full-image score maps for each tier
+    # Build full-image score maps for each tier (A/B/C/D/E)
     tier_scores = {
         "nen_cat_a": np.full((h, w), -np.inf, dtype=np.float32),
+        "nen_cat_b": np.full((h, w), -np.inf, dtype=np.float32),
         "nen_cat_c": np.full((h, w), -np.inf, dtype=np.float32),
+        "nen_cat_d": np.full((h, w), -np.inf, dtype=np.float32),
         "nen_cat_e": np.full((h, w), -np.inf, dtype=np.float32),
     }
     
@@ -1346,67 +1829,158 @@ def _apply_tier_thresholds(
             if np.any(update_pixels):
                 tier_scores[prompt_name][update_pixels] = score
     
-    # For each pixel, apply threshold-based tier selection: E -> C -> A
+    # For each pixel, apply threshold-based tier selection: E > D > C > B > A
     e_scores = tier_scores["nen_cat_e"]
+    d_scores = tier_scores["nen_cat_d"]
     c_scores = tier_scores["nen_cat_c"]
+    b_scores = tier_scores["nen_cat_b"]
     a_scores = tier_scores["nen_cat_a"]
-    
+
     # Build refined masks based on thresholds
     e_confident = e_scores > e_threshold
+    d_confident = d_scores > d_threshold
     c_confident = c_scores > c_threshold
-    
-    # Pixel assignment logic:
-    # 1. If E score is high enough, assign to E
-    # 2. Else if C score is high enough, assign to C
-    # 3. Else assign to A (or leave as default if A score is too low)
-    
+    b_confident = b_scores > b_threshold
+
     refined_masks = {
         "nen_cat_a": np.zeros((h, w), dtype=bool),
+        "nen_cat_b": np.zeros((h, w), dtype=bool),
         "nen_cat_c": np.zeros((h, w), dtype=bool),
+        "nen_cat_d": np.zeros((h, w), dtype=bool),
         "nen_cat_e": np.zeros((h, w), dtype=bool),
     }
-    
-    # Assign E tier (only if confident)
+
+    # Assign tiers in priority order
     refined_masks["nen_cat_e"] = e_confident.copy()
+    refined_masks["nen_cat_d"] = d_confident.copy() & ~refined_masks["nen_cat_e"]
+    refined_masks["nen_cat_c"] = c_confident.copy() & ~refined_masks["nen_cat_e"] & ~refined_masks["nen_cat_d"]
+    refined_masks["nen_cat_b"] = b_confident.copy() & ~refined_masks["nen_cat_e"] & ~refined_masks["nen_cat_d"] & ~refined_masks["nen_cat_c"]
+
+    # Fallback to A for any remaining pixels
+    remaining = ~(refined_masks["nen_cat_e"] | refined_masks["nen_cat_d"] | refined_masks["nen_cat_c"] | refined_masks["nen_cat_b"])
+    refined_masks["nen_cat_a"] = remaining.copy()
     
-    # Assign C tier (only if confident AND not already assigned to E)
-    c_and_not_e = c_confident & ~e_confident
-    refined_masks["nen_cat_c"] = c_and_not_e.copy()
-    
-    # Assign A tier (fallback: default to A if not C or E, or if A score is reasonable)
-    not_e_or_c = ~e_confident & ~c_confident
-    a_or_unassigned = (a_scores > -np.inf) | not_e_or_c
-    refined_masks["nen_cat_a"] = a_or_unassigned.copy()
-    
-    # Ensure pixel-level winner-takes-all to avoid overlaps
-    # Give priority: E > C > A
+    # Ensure pixel-level winner-takes-all to avoid overlaps for the tiered classes.
+    # Give priority: E > C > A.
     final_masks = {
         "nen_cat_e": refined_masks["nen_cat_e"].copy(),
         "nen_cat_c": refined_masks["nen_cat_c"].copy() & ~refined_masks["nen_cat_e"],
         "nen_cat_a": refined_masks["nen_cat_a"].copy() & ~refined_masks["nen_cat_e"] & ~refined_masks["nen_cat_c"],
     }
+
+    # Preserve any non-tiered prompts (for split A-E runs this keeps B and D alive).
+    for prompt_name, mask in combined_masks.items():
+        if prompt_name not in final_masks:
+            final_masks[prompt_name] = mask.copy()
     
     # Print statistics
     print("[INFO] Tier threshold refinement:")
     print(f"  E threshold: {e_threshold:.3f}, pixels assigned: {final_masks['nen_cat_e'].sum():,}")
+    print(f"  D threshold: {d_threshold:.3f}, pixels assigned: {final_masks['nen_cat_d'].sum():,}")
     print(f"  C threshold: {c_threshold:.3f}, pixels assigned: {final_masks['nen_cat_c'].sum():,}")
+    print(f"  B threshold: {b_threshold:.3f}, pixels assigned: {final_masks['nen_cat_b'].sum():,}")
     print(f"  A (fallback): pixels assigned: {final_masks['nen_cat_a'].sum():,}")
+    for prompt_name, mask in final_masks.items():
+        if prompt_name not in {"nen_cat_a", "nen_cat_c", "nen_cat_e"}:
+            print(f"  {prompt_name}: pixels preserved: {mask.sum():,}")
     
     return final_masks
 
 
-# Apply tier thresholds to reduce false positive uncomfortable (E) tier assignments
-tier_e_threshold = float(getattr(cfg, "tier_e_threshold", 0.25))
-tier_c_threshold = float(getattr(cfg, "tier_c_threshold", 0.15))
-if tier_e_threshold > 0 or tier_c_threshold > 0:
-    print(f"[INFO] Applying tier thresholds: E={tier_e_threshold:.3f}, C={tier_c_threshold:.3f}")
-    combined_masks = _apply_tier_thresholds(
-        combined_masks,
-        selected_masks_by_prompt,
-        img_model.shape[:2],
-        e_threshold=tier_e_threshold,
-        c_threshold=tier_c_threshold,
+def _build_contrastive_full_image_masks(
+    scored_masks_by_prompt: dict[str, list[dict]],
+    image_shape: tuple[int, int],
+    prompt_names_ordered: list[str],
+    prompt_weights: dict[str, float] | None = None,
+) -> dict[str, np.ndarray]:
+    """Assign each pixel by contrastive score across prompts.
+
+    For each prompt, we build a per-pixel score map using the highest CLIP score from
+    any selected mask covering that pixel. We then compare each prompt against the
+    mean score of the other prompts and assign each pixel to the prompt with the
+    highest contrastive score.
+    """
+    h, w = image_shape
+    if not prompt_names_ordered:
+        return {}
+
+    prompt_weights = prompt_weights or {}
+    weight_values = np.array(
+        [float(prompt_weights.get(prompt_name, 1.0)) for prompt_name in prompt_names_ordered],
+        dtype=np.float32,
     )
+
+    chunk_size = max(256, _get_chunk_size_px())
+    total_scored_masks = sum(len(v) for v in scored_masks_by_prompt.values())
+    print(
+        f"[INFO] Contrastive assignment scanning {total_scored_masks} scored masks in {chunk_size}px chunks"
+    )
+    if any(abs(weight - 1.0) > 1e-6 for weight in weight_values):
+        weight_str = ", ".join(
+            f"{prompt_name}={weight_values[idx]:.2f}" for idx, prompt_name in enumerate(prompt_names_ordered)
+        )
+        print(f"[INFO] Contrastive prompt weights: {weight_str}")
+
+    global_covered = np.zeros((h, w), dtype=bool)
+    global_winners = np.zeros((h, w), dtype=np.uint8)
+
+    for y0 in range(0, h, chunk_size):
+        y1 = min(h, y0 + chunk_size)
+        chunk_h = y1 - y0
+        for x0 in range(0, w, chunk_size):
+            x1 = min(w, x0 + chunk_size)
+            chunk_w = x1 - x0
+
+            score_maps: list[np.ndarray] = []
+            for prompt_name in prompt_names_ordered:
+                # Initialize to -np.inf to preserve actual negative scores & support negative CLIP similarities
+                score_map = np.full((chunk_h, chunk_w), -np.inf, dtype=np.float32)
+                score_key = f"clip_score_{prompt_name}"
+                for mask_dict in scored_masks_by_prompt.get(prompt_name, []):
+                    score = float(mask_dict.get(score_key, mask_dict.get("score", 0.0)))
+                    _update_score_map_from_mask(score_map, mask_dict, score, y0, x0)
+                score_maps.append(score_map)
+
+            stack = np.stack(score_maps, axis=0)
+
+            # Record pixel coverage: a pixel is covered if at least one prompt has a score > -inf
+            chunk_covered = np.any(stack != -np.inf, axis=0)
+            global_covered[y0:y1, x0:x1] = chunk_covered
+
+            # Clean the stack: replace -np.inf values with a low neutral fallback (-1.0)
+            # so they do not contaminate contrastive calculation with -inf or NaN
+            stack_clean = np.where(stack == -np.inf, -1.0, stack)
+
+            weighted_stack = stack_clean * weight_values[:, None, None]
+            contrastive = np.zeros_like(weighted_stack)
+            for idx in range(len(prompt_names_ordered)):
+                others = np.delete(weighted_stack, idx, axis=0)
+                mean_others = others.mean(axis=0)
+                contrastive[idx] = weighted_stack[idx] - mean_others
+
+            winners = np.argmax(contrastive, axis=0)
+            global_winners[y0:y1, x0:x1] = winners
+
+    # Propagate labels to any pixels that were never covered by any mask
+    if not np.all(global_covered):
+        uncovered_count = np.sum(~global_covered)
+        if np.any(global_covered):
+            print(
+                f"[INFO] Propagating nearest category labels to {uncovered_count} uncovered pixels "
+                "using scipy.ndimage.distance_transform_edt"
+            )
+            from scipy.ndimage import distance_transform_edt
+            _, indices = distance_transform_edt(~global_covered, return_indices=True)
+            global_winners = global_winners[tuple(indices)]
+        else:
+            print("[WARN] No masks generated across any prompt; keeping default category assignments.")
+
+    full_image_masks: dict[str, np.ndarray] = {}
+    for idx, prompt_name in enumerate(prompt_names_ordered):
+        full_image_masks[prompt_name] = (global_winners == idx)
+
+    print(f"[INFO] Contrastive assignment complete: scored {total_scored_masks} masks")
+    return full_image_masks
 
 
 def _build_full_image_prompt_masks(
@@ -1467,19 +2041,109 @@ def _build_full_image_prompt_masks(
 
     return full_image_masks
 
+
+def _build_region_context_full_image_masks(
+    selected_masks_by_prompt: dict[str, list[dict]],
+    image_shape: tuple[int, int],
+    prompt_names_ordered: list[str],
+) -> dict[str, np.ndarray]:
+    """Build full-image masks from region-context prompt assignments in one pass."""
+    h, w = image_shape
+    full_image_masks: dict[str, np.ndarray] = {
+        prompt_name: np.zeros((h, w), dtype=bool) for prompt_name in prompt_names_ordered
+    }
+
+    total_regions = 0
+    for prompt_name in prompt_names_ordered:
+        prompt_regions = selected_masks_by_prompt.get(prompt_name, [])
+        prompt_mask = full_image_masks[prompt_name]
+        prompt_region_count = 0
+        for mask in prompt_regions:
+            region_mask = expand_mask_to_full_image(mask)
+            if not np.any(region_mask):
+                continue
+            prompt_mask |= region_mask
+            total_regions += 1
+            prompt_region_count += 1
+        print(f"[INFO] Region-context mask build: {prompt_name} -> {prompt_region_count:,} regions")
+
+    print(f"[INFO] Region-context full-image masks built from {total_regions:,} regions")
+    return full_image_masks
+
+
+def _build_prompt_strength_heatmap(
+    masks_by_prompt: dict[str, list[dict]],
+    image_shape: tuple[int, int],
+    prompt_name: str,
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    """Build a full-image CLIP strength map for one prompt.
+
+    The map stores the strongest score seen for that prompt at each pixel.
+    Any uncovered pixels are later filled from the nearest covered region so the
+    output spans the full image even when prompt coverage is sparse.
+    """
+    h, w = image_shape
+    score_map = np.full((h, w), -np.inf, dtype=np.float32)
+    covered = np.zeros((h, w), dtype=bool)
+    score_key = f"clip_score_{prompt_name}"
+
+    for mask in masks_by_prompt.get(prompt_name, []):
+        score = float(mask.get(score_key, mask.get("score", float("-inf"))))
+        if not np.isfinite(score):
+            continue
+
+        if "tile_bounds" in mask:
+            ty0, ty1, tx0, tx1 = mask["tile_bounds"]
+            seg = mask.get("segmentation")
+            if seg is not None:
+                th = int(ty1) - int(ty0)
+                tw = int(tx1) - int(tx0)
+                if seg.shape[0] == th and seg.shape[1] == tw:
+                    local_view = score_map[int(ty0):int(ty1), int(tx0):int(tx1)]
+                    update_pixels = seg & (score > local_view)
+                    if np.any(update_pixels):
+                        local_view[update_pixels] = score
+                        covered[int(ty0):int(ty1), int(tx0):int(tx1)] |= seg
+                    continue
+
+        region_mask = expand_mask_to_full_image(mask)
+        if not np.any(region_mask):
+            continue
+        update_pixels = region_mask & (score > score_map)
+        if np.any(update_pixels):
+            score_map[update_pixels] = score
+        covered |= region_mask
+
+    if not np.any(covered):
+        return None, None
+
+    if not np.all(covered):
+        from scipy.ndimage import distance_transform_edt
+
+        _, indices = distance_transform_edt(~covered, return_indices=True)
+        score_map = score_map[tuple(indices)]
+
+    return score_map, covered
+
 prompt_order = list(cfg.dino_prompt_configs) if hasattr(cfg, "dino_prompt_configs") else []
 prompt_names_ordered = [p["name"] for p in prompt_order]
 
-if bool(getattr(cfg, "full_image_mask_mode", False)):
-    print("[INFO] Full-image mask mode enabled: assigning every pixel to the highest-scoring prompt")
+if pixel_assignment_mode == "contrastive":
+    contrastive_prompt_weights = dict(getattr(cfg, "contrastive_prompt_weights", {}))
+    combined_masks = _build_contrastive_full_image_masks(
+        selected_masks_by_prompt,
+        img_model.shape[:2],
+        prompt_names_ordered,
+        contrastive_prompt_weights,
+    )
+    # one summary printed inside the contrastive builder
+elif bool(getattr(cfg, "full_image_mask_mode", False)) and pixel_assignment_mode != "region_context":
     combined_masks = _build_full_image_prompt_masks(
         selected_masks_by_prompt,
         img_model.shape[:2],
         prompt_names_ordered,
     )
-    for prompt_name in prompt_names_ordered:
-        mask_pixels = int(combined_masks.get(prompt_name, np.zeros(img_model.shape[:2], dtype=bool)).sum())
-        print(f"[DEBUG] {prompt_name}: full-image pixels = {mask_pixels:,}")
+    # suppressed per-prompt debug outputs
 else:
     # Apply prompt priority: earlier prompts in ACTIVE_PROMPTS take precedence
     # (so sports_court masks remove overlapping building_roof, etc.)
@@ -1508,13 +2172,103 @@ else:
 
     combined_masks = combined_masks_with_priority
 
+    # Always ensure the final output is a full-image label map, even if we capped or
+    # filtered masks aggressively upstream.
+    combined_masks = _fill_full_image_mask_gaps(
+        combined_masks,
+        img_model.shape[:2],
+        prompt_names_ordered,
+    )
+
+    coarse_to_fine_cell_px = int(getattr(cfg, "coarse_to_fine_cell_px", 0))
+    if coarse_to_fine_cell_px > 1:
+        combined_masks = _apply_coarse_to_fine_pass(
+            combined_masks,
+            img_model.shape[:2],
+            prompt_names_ordered,
+            coarse_to_fine_cell_px,
+        )
+
+
+if pixel_assignment_mode == "legacy":
+    # Apply tier thresholds to reduce false positive uncomfortable (E) tier assignments
+    tier_e_threshold = float(getattr(cfg, "tier_e_threshold", 0.25))
+    tier_c_threshold = float(getattr(cfg, "tier_c_threshold", 0.15))
+    tier_d_threshold = float(getattr(cfg, "tier_d_threshold", 0.0))
+    tier_b_threshold = float(getattr(cfg, "tier_b_threshold", 0.0))
+    if tier_e_threshold > 0 or tier_c_threshold > 0 or tier_d_threshold > 0 or tier_b_threshold > 0:
+        print(
+            f"[INFO] Applying tier thresholds: E={tier_e_threshold:.3f}, D={tier_d_threshold:.3f}, "
+            f"C={tier_c_threshold:.3f}, B={tier_b_threshold:.3f}"
+        )
+        combined_masks = _apply_tier_thresholds(
+            combined_masks,
+            selected_masks_by_prompt,
+            img_model.shape[:2],
+            e_threshold=tier_e_threshold,
+            c_threshold=tier_c_threshold,
+            d_threshold=tier_d_threshold,
+            b_threshold=tier_b_threshold,
+        )
+
+if bool(getattr(cfg, "enable_annotation_iou_check", False)):
+    print("[INFO] Starting annotation IoU check")
+    try:
+        from models.iou_comparator import compare_annotation_iou
+        from visualizations.annotation_iou_visuals import save_annotation_iou_comparison_figure
+
+        iou_report = compare_annotation_iou(
+            Path(active_tif_file).name,
+            combined_masks,
+            xml_path=getattr(cfg, "annotation_iou_xml_path", None),
+            output_dir=getattr(cfg, "annotation_iou_output_dir", None),
+            search_root=PROJECT_ROOT / "Maps" / "Tiles",
+            class_mode=getattr(cfg, "annotation_iou_class_mode", None),
+        )
+        print(
+            "[INFO] Annotation IoU check: "
+            f"mIoU={iou_report['mean_iou']:.3f}, "
+            f"pixel_accuracy={iou_report['pixel_accuracy']:.3f}, "
+            f"evaluated_pixels={iou_report['evaluated_pixels']:,}, "
+            f"ignored_invalid_pixels={iou_report['ignored_invalid_pixels']:,}"
+        )
+
+        comparison_output_path = (
+            Path(getattr(cfg, "annotation_iou_output_dir", cfg.results_dir / "annotation_iou"))
+            / f"{Path(active_tif_file).stem}_comparison.png"
+        )
+        save_annotation_iou_comparison_figure(
+            img_display,
+            np.asarray(iou_report["ground_truth_class_map"]),
+            np.asarray(iou_report["prediction_class_map"]),
+            np.asarray(iou_report["valid_mask"]),
+            comparison_output_path,
+            title=f"{Path(active_tif_file).name}  |  IoU comparison",
+        )
+        print(f"[INFO] Saved annotation comparison figure to: {comparison_output_path}")
+        for class_name, class_stats in iou_report["class_results"].items():
+            print(
+                f"[INFO]   {class_name}: IoU={class_stats['iou']:.3f}, "
+                f"pred={int(class_stats['pred_pixels']):,}, gt={int(class_stats['gt_pixels']):,}"
+            )
+        if iou_report.get("output_path"):
+            print(f"[INFO]   IoU report saved to: {iou_report['output_path']}")
+        print("[INFO] Annotation IoU check complete")
+    except FileNotFoundError:
+        print(f"[INFO] No annotations found for tile '{Path(active_tif_file).name}'; skipping IoU check")
+    except Exception as exc:
+        log_pipeline_error("Annotation IoU comparison failed", exc)
+
 # Compute overlap mask (union of all masks)
+print("[INFO] Computing union of all prompt masks")
 union_of_all = np.zeros(img_model.shape[:2], dtype=bool)
 for combined in combined_masks.values():
     union_of_all |= combined
+print("[INFO] Union of all prompt masks complete")
 
 # Visualize each prompt separately and create combined overlay
-viz_stride = max(1, int(np.ceil(max(img_model.shape[:2]) / 2000)))
+combined_viz_max_dim = int(getattr(cfg, "combined_visualization_max_dim", 1200))
+viz_stride = max(1, int(np.ceil(max(img_model.shape[:2]) / combined_viz_max_dim)))
 if viz_stride > 1:
     print(f"[INFO] Downsampling visualization by stride={viz_stride} to reduce memory use")
 
@@ -1523,14 +2277,18 @@ print(f"[DEBUG] combined_masks keys: {list(combined_masks.keys())}")
 for pname, pmask in combined_masks.items():
     print(f"[DEBUG]   {pname}: {pmask.sum():,} pixels ({pmask.sum() / pmask.size * 100:.2f}% coverage)")
 
+print("[INFO] Starting visualization generation")
+faulthandler.dump_traceback_later(120, repeat=False)
 viz_img = img_display[::viz_stride, ::viz_stride]
 
 # Colors for different prompts (explicit and high-contrast for reliable legend matching)
 prompt_colors = {
     # Merged NEN 8100 Wind Comfort Categories
-    "nen_cat_a": [0.00, 0.72, 0.38],   # green - comfortable, sheltered, vegetated
-    "nen_cat_c": [1.00, 0.68, 0.10],   # amber - pedestrian-accessible but uncomfortable
-    "nen_cat_e": [0.95, 0.18, 0.18],   # red - highways, roofs, no-access hardscape
+    "nen_cat_a": [0.00, 0.45, 0.20],   # dark green - comfortable, sheltered, vegetated
+    "nen_cat_b": [0.45, 0.80, 0.25],   # light green - pedestrian-friendly / walkable
+    "nen_cat_c": [1.00, 0.90, 0.20],   # yellow - pedestrian-accessible but uncomfortable
+    "nen_cat_d": [1.00, 0.55, 0.10],   # orange - exposed hardscape / parking
+    "nen_cat_e": [0.90, 0.12, 0.12],   # red - highways, roofs, no-access hardscape
     # Legacy amenity prompts
     "sports_court": [1.00, 0.84, 0.00],   # gold
     "transit_hub": [0.95, 0.35, 0.80],    # magenta-pink
@@ -1551,53 +2309,189 @@ def get_prompt_color(prompt_name: str) -> np.ndarray:
     # Magenta fallback makes missing color mappings immediately obvious.
     return np.array(prompt_colors.get(prompt_name, [1.0, 0.0, 1.0]), dtype=np.float32)
 
+
+from PIL import Image as PILImage
+
+
+def compose_visualization_with_side_panel(
+    base_img: PILImage.Image,
+    title: str,
+    legend_rows: list[tuple[str, np.ndarray | list[float] | tuple[float, float, float]]] | None = None,
+    gradient_cmap=None,
+    gradient_low_label: str = "Low score",
+    gradient_high_label: str = "High score",
+    panel_width: int = 280,
+) -> PILImage.Image:
+    """Add a title and either categorical or gradient legend in a right-side panel."""
+    from PIL import ImageDraw, ImageFont
+
+    img = base_img.copy().convert("RGBA")
+    font = ImageFont.load_default()
+    pad = 14
+    panel_x = img.width + pad * 2
+    canvas_width = img.width + panel_width + pad * 3
+    canvas_height = max(img.height + pad * 2, 260)
+    canvas = PILImage.new("RGBA", (canvas_width, canvas_height), (16, 16, 18, 255))
+    canvas.paste(img, (pad, pad))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle(
+        (panel_x - 10, pad - 6, canvas_width - pad, canvas_height - pad),
+        radius=12,
+        fill=(0, 0, 0, 160),
+        outline=(255, 255, 255, 180),
+        width=1,
+    )
+
+    title_bbox = draw.textbbox((0, 0), title, font=font)
+    title_h = title_bbox[3] - title_bbox[1]
+    draw.text((panel_x, pad), title, font=font, fill=(255, 255, 255, 255))
+    cursor_y = pad + title_h + 12
+
+    if legend_rows:
+        box_size = 14
+        row_gap = 8
+        text_gap = 8
+        for label, color in legend_rows:
+            color_rgb = tuple(int(round(float(c) * 255)) for c in color)
+            draw.rectangle((panel_x, cursor_y + 1, panel_x + box_size, cursor_y + 1 + box_size), fill=color_rgb, outline=(255, 255, 255, 220))
+            draw.text((panel_x + box_size + text_gap, cursor_y), label, font=font, fill=(255, 255, 255, 255))
+            cursor_y += box_size + row_gap
+    elif gradient_cmap is not None:
+        bar_w = panel_width - 30
+        bar_h = 20
+        grad = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        grad_rgba = (gradient_cmap(grad) * 255).astype(np.uint8)[None, :, :]
+        resampling = getattr(getattr(PILImage, "Resampling", PILImage), "BILINEAR", PILImage.BILINEAR)
+        grad_img = PILImage.fromarray(grad_rgba, mode="RGBA").resize((bar_w, bar_h), resample=resampling)
+        canvas.paste(grad_img, (panel_x, cursor_y), grad_img)
+        cursor_y += bar_h + 8
+        draw.text((panel_x, cursor_y), gradient_low_label, font=font, fill=(255, 255, 255, 255))
+        high_bbox = draw.textbbox((0, 0), gradient_high_label, font=font)
+        draw.text((panel_x + bar_w - (high_bbox[2] - high_bbox[0]), cursor_y), gradient_high_label, font=font, fill=(255, 255, 255, 255))
+
+    return canvas
+
 # Save individual visualizations for each prompt
 log_image_stage("Building visualizations", 5, PIPELINE_STAGE_TOTAL)
 for prompt_name, combined_mask in combined_masks.items():
     viz_mask = combined_mask[::viz_stride, ::viz_stride]
-    color = get_prompt_color(prompt_name)
-    
-    viz_overlay = np.zeros((*viz_img.shape[:2], 4), dtype=np.float32)
-    viz_overlay[viz_mask, :3] = color
-    viz_overlay[viz_mask, 3] = 0.50  # Increased alpha from 0.35 to 0.50 for better visibility
+    color = (get_prompt_color(prompt_name) * 255).astype(np.uint8)
 
-    plt.figure(figsize=(10, 10))
-    plt.imshow(viz_img)
-    plt.imshow(viz_overlay)
-    plt.axis("off")
-    plt.title(f"SAM + CLIP {prompt_name.replace('_', ' ').title()} Masks: '{clip_features[prompt_name]['text']}'")
-    save_current_figure(f"{run_id}_{prompt_name}_masks.png", "individual_masks")
+    # Build RGBA overlay for this prompt
+    h_vis, w_vis = viz_img.shape[:2]
+    overlay = np.zeros((h_vis, w_vis, 4), dtype=np.uint8)
+    mask_idx = viz_mask.astype(bool)
+    overlay[mask_idx, :3] = color
+    overlay[mask_idx, 3] = int(0.50 * 255)
 
-# Create combined visualization with all prompts overlaid
-viz_combined_overlay = np.zeros((*viz_img.shape[:2], 4), dtype=np.float32)
-for prompt_name, combined_mask in combined_masks.items():
-    viz_mask = combined_mask[::viz_stride, ::viz_stride]
-    color = get_prompt_color(prompt_name)
-    viz_combined_overlay[viz_mask, :3] = color
-    viz_combined_overlay[viz_mask, 3] = 0.45  # Increased alpha from 0.32 to 0.45 for better visibility
+    base_pil = PILImage.fromarray(viz_img.astype(np.uint8)).convert("RGBA")
+    overlay_pil = PILImage.fromarray(overlay, mode="RGBA")
+    result_pil = PILImage.alpha_composite(base_pil, overlay_pil)
 
-# Create figure with extra space for legend on the right
-fig, ax = plt.subplots(figsize=(12, 10))
-ax.imshow(viz_img)
-ax.imshow(viz_combined_overlay)
-ax.axis("off")
+    # Optionally annotate title via PIL (omitted for speed); save via PIL
+    save_current_figure(f"{run_id}_{prompt_name}_masks.png", "individual_masks", pil_img=result_pil)
 
-# Create legend with custom patches for each prompt
-from matplotlib.patches import Patch
+# Create legend data (not drawn) for consistent labeling elsewhere if needed
 legend_elements = []
 for prompt_name in sorted(combined_masks.keys()):
     color_rgb = get_prompt_color(prompt_name).tolist()
     label = prompt_name.replace('_', ' ').title()
-    legend_elements.append(Patch(facecolor=color_rgb, edgecolor='black', label=label))
+    legend_elements.append((label, color_rgb))
 
-# Add legend outside the plot area on the right side
-ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1.02, 0.5), 
-         fontsize=11, frameon=True, fancybox=True, shadow=True)
+assignment_mode_label = {
+    "contrastive": "Contrastive",
+    "region_context": "Region Context",
+}.get(pixel_assignment_mode, "Legacy")
 
-fig.suptitle(f"Combined Masks: {', '.join(p.replace('_', ' ').title() for p in combined_masks.keys())}", 
-            fontsize=14, weight='bold')
-plt.tight_layout()
-save_current_figure(f"{run_id}_combined_masks.png", "combined_masks")
+if bool(getattr(cfg, "build_prompt_strength_heatmaps", False)):
+    print("[INFO] Building per-prompt CLIP strength heatmaps")
+    from PIL import Image as PILImage
+
+    heatmap_source_by_prompt = selected_masks_by_prompt
+    heatmap_cmap = plt.get_cmap(str(getattr(cfg, "prompt_strength_heatmap_cmap", "magma")))
+    heatmap_alpha = float(getattr(cfg, "prompt_strength_heatmap_alpha", 0.55))
+    heatmap_low_pct = float(getattr(cfg, "prompt_strength_heatmap_percentile_low", 5.0))
+    heatmap_high_pct = float(getattr(cfg, "prompt_strength_heatmap_percentile_high", 95.0))
+    heatmap_viz_max_dim = int(getattr(cfg, "prompt_strength_heatmap_max_dim", 1000))
+    heatmap_viz_stride = max(1, int(np.ceil(max(img_model.shape[:2]) / heatmap_viz_max_dim)))
+    if heatmap_viz_stride > 1:
+        print(f"[INFO] Downsampling prompt strength heatmaps by stride={heatmap_viz_stride} to reduce memory use")
+
+    for prompt_name in prompt_names_ordered:
+        heatmap_scores, heatmap_covered = _build_prompt_strength_heatmap(
+            heatmap_source_by_prompt,
+            img_model.shape[:2],
+            prompt_name,
+        )
+        if heatmap_scores is None or heatmap_covered is None:
+            print(f"[WARN] Skipping prompt strength heatmap for '{prompt_name}' because no pixels were covered")
+            continue
+
+        finite_scores = heatmap_scores[np.isfinite(heatmap_scores)]
+        if finite_scores.size == 0:
+            print(f"[WARN] Skipping prompt strength heatmap for '{prompt_name}' because no finite scores were found")
+            continue
+
+        low = float(np.percentile(finite_scores, heatmap_low_pct))
+        high = float(np.percentile(finite_scores, heatmap_high_pct))
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            low = float(np.nanmin(finite_scores))
+            high = float(np.nanmax(finite_scores))
+        if high <= low:
+            high = low + 1e-6
+
+        heatmap_scores_viz = heatmap_scores[::heatmap_viz_stride, ::heatmap_viz_stride]
+        heatmap_covered_viz = heatmap_covered[::heatmap_viz_stride, ::heatmap_viz_stride]
+        normalized = np.clip((heatmap_scores_viz - low) / (high - low), 0.0, 1.0)
+        normalized = np.where(np.isfinite(heatmap_scores_viz), normalized, 0.0)
+        rgba = (heatmap_cmap(normalized) * 255).astype(np.uint8)
+        rgba[..., 3] = np.where(heatmap_covered_viz, int(round(255 * heatmap_alpha)), 0).astype(np.uint8)
+
+        base_pil = PILImage.fromarray(img_display[::heatmap_viz_stride, ::heatmap_viz_stride].astype(np.uint8)).convert("RGBA")
+        overlay_pil = PILImage.fromarray(rgba, mode="RGBA")
+        result_pil = PILImage.alpha_composite(base_pil, overlay_pil)
+        result_pil = compose_visualization_with_side_panel(
+            result_pil,
+            f"{prompt_name.replace('_', ' ').title()} CLIP Strength Heatmap",
+            gradient_cmap=heatmap_cmap,
+            gradient_low_label="Low score",
+            gradient_high_label="High score",
+        )
+        save_current_figure(f"{run_id}_{prompt_name}_strength_heatmap.png", "prompt_strength_heatmaps", pil_img=result_pil)
+        print(
+            f"[INFO] Saved prompt strength heatmap for '{prompt_name}' "
+            f"(p{heatmap_low_pct:.0f}={low:.3f}, p{heatmap_high_pct:.0f}={high:.3f})"
+        )
+
+# Save combined visualization using PIL compositing to avoid matplotlib figure hangs
+combined_h, combined_w = viz_img.shape[:2]
+combined_overlay = np.zeros((combined_h, combined_w, 4), dtype=np.uint8)
+for prompt_name, combined_mask in combined_masks.items():
+    viz_mask = combined_mask[::viz_stride, ::viz_stride]
+    color = (get_prompt_color(prompt_name) * 255).astype(np.uint8)
+    # apply color where mask is True; last prompt wins for overlapping pixels
+    mask_idx = viz_mask.astype(bool)
+    combined_overlay[mask_idx, :3] = color
+    combined_overlay[mask_idx, 3] = int(0.45 * 255)
+
+base_pil = PILImage.fromarray(viz_img.astype(np.uint8)).convert("RGBA")
+overlay_pil = PILImage.fromarray(combined_overlay, mode="RGBA")
+result_pil = PILImage.alpha_composite(base_pil, overlay_pil)
+result_pil = compose_visualization_with_side_panel(
+    result_pil,
+    "Combined Mask",
+    legend_rows=[
+        ("A", get_prompt_color("nen_cat_a")),
+        ("B", get_prompt_color("nen_cat_b")),
+        ("C", get_prompt_color("nen_cat_c")),
+        ("D", get_prompt_color("nen_cat_d")),
+        ("E", get_prompt_color("nen_cat_e")),
+    ],
+)
+
+save_current_figure(f"{run_id}_combined_masks.png", "combined_masks", pil_img=result_pil)
+print("[INFO] Combined visualization saved")
 
 heatmap_excluded_prompts = set(getattr(cfg, "amenity_heatmap_excluded_prompts", ["building_roof"]))
 heatmap_mask_union = np.zeros(img_model.shape[:2], dtype=bool)
@@ -1620,6 +2514,7 @@ else:
 
 if getattr(cfg, "build_amenity_heatmap", False) and loaded_extent_m is not None:
     stage_start = perf_counter()
+    print("[INFO] Starting amenity heatmap build")
     print(
         "[INFO] Building amenity heatmap grid from mask union "
         f"(cell area: {cfg.amenity_grid_cell_area_m2:.2f} m^2)"
@@ -1652,10 +2547,13 @@ if getattr(cfg, "build_amenity_heatmap", False) and loaded_extent_m is not None:
     plt.axis("off")
     plt.title("Amenity Heatmap (Red = Higher Amenity Coverage)")
     save_current_figure(f"{run_id}_amenity_heatmap.png", "heatmaps")
+    print("[INFO] Amenity heatmap saved")
 elif not getattr(cfg, "build_amenity_heatmap", False):
     print("[INFO] Amenity heatmap generation disabled in config (build_amenity_heatmap=False).")
 else:
     print("[WARN] Skipping amenity heatmap because real-world extent is unavailable.")
+
+faulthandler.cancel_dump_traceback_later()
 
 print(f"[INFO] Total figures saved this run: {len(saved_figure_paths)}")
 for p in saved_figure_paths:
@@ -1663,3 +2561,5 @@ for p in saved_figure_paths:
 
 log_image_stage("Completed", 6, PIPELINE_STAGE_TOTAL)
 log_stage("Pipeline complete", script_start)
+
+print(f"[INFO] Total masks evaluated for CLIP scoring: {total_scored_masks}")

@@ -1,0 +1,88 @@
+python : C:\Users\Ian\Documents\Segmentation 
+Research\.venv\Lib\site-packages\timm\models\layers\__init__.py:49: 
+FutureWarning: Importing from timm.models.layers is deprecated, please import 
+via timm.layers
+At line:1 char:30
++ .venv\Scripts\Activate.ps1 ; python -u get_satellite.py 2>&1 | Tee-Ob ...
++                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\Ian\Do...via timm.layers 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via 
+timm.layers", FutureWarning)
+[INFO] Starting satellite sidewalk segmentation pipeline
+[INFO] Saving output figures to: C:\Users\Ian\Documents\Segmentation Research\Results
+[INFO] Reading GeoTIFF spatial metadata
+[INFO] CRS: EPSG:3857
+[INFO] Raster size (pixels): 8001 x 8001
+[INFO] Raster bounds (native CRS units): BoundingBox(left=-9395996.756086849, bottom=3998079.897551847, right=-9393963.820602983, top=4000112.8330357163)
+[INFO] Full image real size (approx meters): 2032.94 m x 2032.94 m
+[INFO] Full image pixel size (approx meters/pixel): 0.2541 x 0.2541
+[INFO] Reading GeoTIFF: Maps/GTCampus/Try6.tif
+[INFO] Finished reading full raster image (1.06s)
+[INFO] Loaded image real size (approx meters): 2032.94 m x 2032.94 m
+[INFO] Cropped image shape: 8001x8001 (3 channels)
+[INFO] Saved figure: results\input_images\Try6_input_image.png
+[INFO] Running Grounding DINO detection
+final text_encoder_type: bert-base-uncased
+C:\Users\Ian\Documents\Segmentation 
+Research\.venv\Lib\site-packages\huggingface_hub\file_download.py:1132: 
+FutureWarning: `resume_download` is deprecated and will be removed in version 
+1.0.0. Downloads always resume when possible. If you want to force a new 
+download, use `force_download=True`.
+  warnings.warn(
+Some weights of the model checkpoint at bert-base-uncased were not used when 
+initializing BertModel: ['cls.predictions.transform.LayerNorm.weight', 
+'cls.predictions.transform.dense.weight', 
+'cls.predictions.transform.dense.bias', 'cls.seq_relationship.bias', 
+'cls.predictions.bias', 'cls.predictions.transform.LayerNorm.bias', 
+'cls.seq_relationship.weight']
+- This IS expected if you are initializing BertModel from the checkpoint of a 
+model trained on another task or with another architecture (e.g. initializing 
+a BertForSequenceClassification model from a BertForPreTraining model).
+- This IS NOT expected if you are initializing BertModel from the checkpoint 
+of a model that you expect to be exactly identical (initializing a 
+BertForSequenceClassification model from a BertForSequenceClassification 
+model).
+[INFO] Saved figure: results\dino_detections\20260324_173354_dino_input_debug.png
+[INFO] Pixel-to-meters: 15.489641 px▓/m▓
+[INFO] Running prompt-by-prompt DINO detection
+C:\Users\Ian\Documents\Segmentation 
+Research\.venv\Lib\site-packages\transformers\modeling_utils.py:884: 
+FutureWarning: The `device` argument is deprecated and will be removed in v5 
+of Transformers.
+  warnings.warn(
+C:\Users\Ian\Documents\Segmentation 
+Research\.venv\Lib\site-packages\torch\_dynamo\eval_frame.py:1181: 
+UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be 
+passed explicitly. Starting in PyTorch 2.9, calling checkpoint without 
+use_reentrant will raise an exception. use_reentrant=False is recommended, but 
+if you need to preserve the current default behavior, you can pass 
+use_reentrant=True. Refer to docs for more details on the differences between 
+the two variants.
+  return fn(*args, **kwargs)
+C:\Users\Ian\Documents\Segmentation 
+Research\.venv\Lib\site-packages\torch\utils\checkpoint.py:232: UserWarning: 
+None of the inputs have requires_grad=True. Gradients will be None
+  check_backward_validity(args)
+C:\Users\Ian\Documents\Segmentation Research\.venv\Lib\site-packages\groundingd
+ino\models\GroundingDINO\transformer.py:863: FutureWarning: 
+`torch.cuda.amp.autocast(args...)` is deprecated. Please use 
+`torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(enabled=False):
+[INFO] DINO [sidewalk] full-image detections: 3
+[INFO] DINO [sidewalk] retrying tiled fallback after filtering (25 tiles, tile=2200, overlap=200)
+[WARN] DINO [sidewalk] retry tile 5/25 failed: selected index k out of range
+[INFO] DINO [sidewalk] stopping tiled retry early at tile 9/25 with 25 detections
+[INFO] DINO [sidewalk] tiled retry detections: 25
+[INFO] DINO [sidewalk] kept for SAM: 0
+[WARN] Grounding DINO produced no valid detections after filtering. Running tiled automatic SAM fallback.
+[INFO] Loading SAM model 'vit_b' on device 'cpu'
+[INFO] SAM model ready (77.64s)
+[INFO] Running tiled SAM automatic mask generation (49 tiles, tile=1400, overlap=160, points_per_side=24)
+[PROGRESS] SAM auto tiles 1/49 complete, masks so far: 79
+[PROGRESS] SAM auto tiles 5/49 complete, masks so far: 404
+[PROGRESS] SAM auto tiles 10/49 complete, masks so far: 740
+[PROGRESS] SAM auto tiles 15/49 complete, masks so far: 1049
+[PROGRESS] SAM auto tiles 20/49 complete, masks so far: 1359
