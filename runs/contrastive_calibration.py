@@ -93,7 +93,7 @@ def _run_worker(trial_name: str, tif_file: str, output_dir: Path, weights: dict[
         "overrides": {
             "contrastive_prompt_weights": weights,
             "pixel_assignment_mode": "region_context",
-            "build_prompt_strength_heatmaps": False,
+            "build_prompt_strength_heatmaps": True,
             "coarse_to_fine_cell_px": 0,
             "sam_auto_max_total_masks": 5000,
             "output_dpi": 90,
@@ -132,20 +132,21 @@ def main() -> int:
     for index, variant in enumerate(variants, start=1):
         prompt_name = variant["prompt"]
         weight = variant["weight"]
-        trial_name_base = variant["trial_name"]
+        trial_name_base = f"trial_{index:03d}"
+        trial_folder = output_root / trial_name_base
+        trial_folder.mkdir(parents=True, exist_ok=True)
         per_tile_reports: list[dict[str, Any]] = []
 
         print(f"[INFO] [{index}/{total_configs}] Running config {trial_name_base} ({prompt_name}={weight:.3f})")
         for tile_index, tif_file in enumerate(TILES, start=1):
             tile_stem = _tile_stem(tif_file)
-            trial_name = f"{trial_name_base}__{tile_stem}"
-            trial_dir = output_root / trial_name
-            trial_dir.mkdir(parents=True, exist_ok=True)
+            tile_folder = trial_folder / tile_stem
+            tile_folder.mkdir(parents=True, exist_ok=True)
 
-            run_result = _run_worker(trial_name, tif_file, output_root, variant["weights"])
-            report_path = trial_dir / "annotation_iou" / f"{tile_stem}_iou_report.json"
+            run_result = _run_worker(tile_stem, tif_file, trial_folder, variant["weights"])
+            report_path = tile_folder / "annotation_iou" / f"{tile_stem}_iou_report.json"
             if run_result["returncode"] != 0 or not report_path.exists():
-                print(f"[WARN] [{index}/{total_configs}] Tile failed or report missing for {trial_name}")
+                print(f"[WARN] [{index}/{total_configs}] Tile failed or report missing for {tile_stem} in {trial_name_base}")
                 per_tile_reports.append(
                     {
                         "tile": tile_stem,
@@ -174,12 +175,17 @@ def main() -> int:
             "prompt": prompt_name,
             "weight": weight,
             "weights": variant["weights"],
+            "trial_folder": str(trial_folder),
             "mean_iou_avg": float(mean([item["mean_iou"] for item in valid_reports])) if valid_reports else float("nan"),
             "mean_pixel_accuracy_avg": float(mean([item["pixel_accuracy"] for item in valid_reports])) if valid_reports else float("nan"),
             "per_tile_reports": per_tile_reports,
             "failed_tiles": len(per_tile_reports) - len(valid_reports),
         }
         results.append(summary)
+
+        trial_summary_path = trial_folder / "trial_summary.json"
+        with trial_summary_path.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, default=_json_default)
 
         elapsed = (datetime.now() - started).total_seconds()
         remaining = max(0, total_configs - index)

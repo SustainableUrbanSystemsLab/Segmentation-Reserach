@@ -1,4 +1,6 @@
 .venv/
+.env
+.env.*
 planet.local.json
 *.tif
 *.pth

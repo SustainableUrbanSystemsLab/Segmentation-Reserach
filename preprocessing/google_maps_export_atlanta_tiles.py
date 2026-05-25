@@ -39,7 +39,12 @@ OVERWRITE = False
 REQUEST_TIMEOUT_S = 60
 RETRY_COUNT = 3
 RETRY_SLEEP_S = 5
-GOOGLE_MAPS_API_KEY = "AIzaSyCyee_Mof5qJZioA7zoHjxDNX0GQMf4rnM"
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
+
+if not GOOGLE_MAPS_API_KEY:
+    raise RuntimeError(
+        "GOOGLE_MAPS_API_KEY is not set. Export it in your shell or place it in a local .env file before running this script."
+    )
 
 # ============================================================
 # GOOGLE PILE PROJECTION UNIT SYSTEM MATH
