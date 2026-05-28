@@ -1,12 +1,32 @@
+# Core numerical / imaging stack
 numpy
-rasterio
+scipy
 matplotlib
+Pillow
+requests
 pyproj
+rasterio
 contextily
+opencv-contrib-python-headless
 scikit-learn
 scikit-image
-opencv-contrib-python
-torchaudio
-git+https://github.com/IDEA-Research/GroundingDINO.git
+ultralytics>=8.3.0
+
+# Model/runtime dependencies used by the DINO -> SAM -> CLIP pipeline
+#torch
+#torchvision
+#torchaudio
+#open_clip_torch
+segment-anything
 transformers<5
 huggingface_hub<1.0
+
+# GroundingDINO local checkout bundled in this repository
+#-e ./GroundingDINO-main
+
+# GroundingDINO extras pulled in by its local package metadata
+addict
+yapf
+timm
+supervision>=0.22.0
+pycocotools
