@@ -285,6 +285,7 @@ class _FilteredOutput:
 def _worker_main(spec: dict[str, Any]) -> int:
     from models import config as cfg
     from models import prompts as prompts_module
+    import torch
 
     spec = copy.deepcopy(spec)
     output_dir = Path(spec["output_dir"])
@@ -308,6 +309,25 @@ def _worker_main(spec: dict[str, Any]) -> int:
 
     prompts_module.AVAILABLE_PROMPTS = _deep_copy_prompt_map(prompts_module)
     _apply_overrides(cfg, prompts_module, spec["overrides"])
+
+    cuda_available = bool(torch.cuda.is_available())
+    cuda_device = torch.cuda.current_device() if cuda_available else None
+    cuda_name = torch.cuda.get_device_name(cuda_device) if cuda_available else None
+    cuda_probe_device = None
+    cuda_probe_ok = False
+    if cuda_available:
+        cuda_probe_device = str(torch.empty(1, device="cuda").device)
+        cuda_probe_ok = cuda_probe_device.startswith("cuda")
+
+    print(
+        f"[CUDA] worker_probe: available={cuda_available} | "
+        f"device={cuda_device} | name={cuda_name} | probe={cuda_probe_device} | ok={cuda_probe_ok}"
+    )
+    print(
+        f"[CUDA] config: sam_device={getattr(cfg, 'sam_device', None)} | "
+        f"dino_device={getattr(cfg, 'dino_device', None)} | "
+        f"overwrite_pipeline_cache={getattr(cfg, 'overwrite_pipeline_cache', None)}"
+    )
 
     cfg.enable_annotation_iou_check = True
     cfg.annotation_iou_xml_path = spec.get("xml_path") or spec.get("annotation_path")

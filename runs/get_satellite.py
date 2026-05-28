@@ -235,6 +235,21 @@ cfg.results_dir.mkdir(parents=True, exist_ok=True)
 print(f"[INFO] Saving output figures to: {cfg.results_dir.resolve()}")
 saved_figure_paths: list[Path] = []
 
+
+def _visualizations_exist(results_dir: Path, run_id: str) -> bool:
+    """Return True if the key visualizations and IoU report already exist."""
+    # Combined mask image
+    combined_dir = results_dir / "combined_masks"
+    combined_file = combined_dir / f"{run_id}_combined_masks.png"
+
+    # Annotation IoU report (any *_iou_report.json in annotation_iou)
+    iou_dir = results_dir / "annotation_iou"
+    iou_exists = False
+    if iou_dir.exists() and any(iou_dir.glob("*_iou_report.json")):
+        iou_exists = True
+
+    return combined_file.exists() and iou_exists
+
 # Save figures at native raster pixel resolution when possible.
 DEFAULT_SAVE_DPI = int(getattr(cfg, "output_dpi", 100))
 DINO_SAVE_DPI = int(getattr(cfg, "dino_visualization_dpi", 75))
@@ -349,6 +364,38 @@ def save_region_context_scoring_cache(
     if not region_context_masks:
         return False
 
+    # Avoid caching full segmentation arrays for region-context scoring. Instead
+    # write a tiny metadata file so we can detect that scoring ran without
+    # storing the potentially huge per-region `segmentation` arrays.
+    if bool(getattr(cfg, "skip_mask_caching", True)):
+        try:
+            cache_dir = get_cache_dir()
+            cache_file = cache_dir / file_context
+            # Build minimal metadata (do NOT include 'segmentation' arrays)
+            minimal_masks = []
+            for m in region_context_masks:
+                md = {
+                    "tile_bounds": m.get("tile_bounds"),
+                    "predicted_iou": float(m.get("predicted_iou", 0.0)),
+                    "stability_score": float(m.get("stability_score", 0.0)),
+                }
+                minimal_masks.append(md)
+
+            with open(cache_file, "wb") as f:
+                pickle.dump(
+                    {
+                        "prompt_signature": prompt_signature,
+                        "total_scored_masks": int(total_scored_masks),
+                        "region_context_masks_meta": minimal_masks,
+                    },
+                    f,
+                )
+            print(f"[INFO] Cached region-context scoring metadata: {cache_file.name}")
+            return True
+        except Exception as exc:
+            print(f"[WARN] Failed to save region-context scoring cache metadata: {exc}")
+            return False
+
     try:
         cache_dir = get_cache_dir()
         cache_file = cache_dir / file_context
@@ -386,10 +433,17 @@ def load_region_context_scoring_cache(
         if not cache_file.exists():
             return None
 
+        # If masking caching is skipped we still wrote metadata; however the
+        # full segmentation arrays are not stored and cannot be restored. To
+        # avoid accidental misuse, return None so callers recompute masks.
         with open(cache_file, "rb") as f:
             data = pickle.load(f)
         if data.get("prompt_signature") != prompt_signature:
             print(f"[INFO] Ignoring region-context cache with mismatched prompt signature: {cache_file.name}")
+            return None
+
+        if bool(getattr(cfg, "skip_mask_caching", True)):
+            print(f"[INFO] Region-context cache exists but contains metadata only: {cache_file.name}")
             return None
 
         region_context_masks = data.get("region_context_masks")
@@ -459,7 +513,33 @@ def save_masks_cache(image_path: str, image_hash: str, masks: list | None, file_
         return False
     if masks is None or not masks:
         return False
-    
+
+    # Optionally skip writing full mask arrays to disk. Instead write a
+    # compact metadata-only cache entry so we still know masks were produced
+    # without storing multi-GB segmentation arrays per trial.
+    if bool(getattr(cfg, "skip_mask_caching", True)):
+        try:
+            cache_dir = get_cache_dir()
+            cache_file = cache_dir / file_context
+            masks_meta = []
+            for m in masks:
+                masks_meta.append(
+                    {
+                        "tile_bounds": m.get("tile_bounds"),
+                        "predicted_iou": float(m.get("predicted_iou", 0.0)),
+                        "stability_score": float(m.get("stability_score", 0.0)),
+                        "dino_prompt_group": m.get("dino_prompt_group"),
+                    }
+                )
+
+            with open(cache_file, "wb") as f:
+                pickle.dump({"masks_meta": masks_meta, "num_masks": len(masks)}, f)
+            print(f"[INFO] Cached SAM masks metadata (no segmentation arrays): {cache_file.name}")
+            return True
+        except Exception as e:
+            print(f"[WARN] Failed to save masks cache metadata: {e}")
+            return False
+
     try:
         cache_dir = get_cache_dir()
         cache_file = cache_dir / file_context
@@ -487,6 +567,13 @@ def load_masks_cache(image_path: str, image_hash: str, file_context: str) -> lis
         
         with open(cache_file, "rb") as f:
             data = pickle.load(f)
+
+        # If we are skipping mask caching then cache files only contain
+        # metadata and cannot be used to restore segmentation arrays.
+        if bool(getattr(cfg, "skip_mask_caching", True)):
+            print(f"[INFO] Found masks cache metadata but skipping full restore: {cache_file.name}")
+            return None
+
         masks = data.get("masks")
         print(f"[INFO] Loaded {len(masks) if masks else 0} masks from cache: {cache_file.name}")
         return masks
@@ -712,14 +799,25 @@ input_image_filename = f"{Path(active_tif_file).stem}_input_image.png"
 input_image_out = cfg.results_dir / "input_images" / input_image_filename
 input_image_out.parent.mkdir(parents=True, exist_ok=True)
 img_pil = Image.fromarray(img_display, mode="RGB")
-img_pil.save(str(input_image_out))
-saved_figure_paths.append(input_image_out)
-print(f"[INFO] Saved figure: {input_image_out}")
+if bool(getattr(cfg, "save_input_images", False)):
+    img_pil.save(str(input_image_out))
+    saved_figure_paths.append(input_image_out)
+    print(f"[INFO] Saved input image: {input_image_out}")
+else:
+    print(f"[DEBUG] Skipping saving input image (cfg.save_input_images=False)")
 log_stage("Image preprocessing complete", preprocessing_start)
 
 # Compute image hash for cache keying
 image_hash = compute_image_hash(img_model)
 print(f"[INFO] Image hash for caching: {image_hash}")
+
+# If requested, skip heavy processing when visualizations + IoU already exist.
+if bool(getattr(cfg, "skip_if_visualizations_exist", True)):
+    try:
+        if _visualizations_exist(cfg.results_dir, run_id):
+            finish_pipeline_early("Visualizations and IoU report already exist; skipping heavy processing")
+    except Exception as exc:
+        print(f"[WARN] Visualizations exist check failed: {exc}")
 
 # Conditional DINO + SAM or automatic SAM
 stage_start = perf_counter()

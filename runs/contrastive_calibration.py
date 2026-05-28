@@ -2,25 +2,45 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
+from time import perf_counter
 from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CALIBRATE = PROJECT_ROOT / "runs" / "calibrate_configs.py"
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return int(value)
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return float(value)
+
 # Run on the labeled tiles only. Tile 004 is intentionally omitted.
 TILES = [
-    "Maps/Tiles/Atlanta_split_google/tile_002_000.tif",
-    "Maps/Tiles/Atlanta_split_google/tile_002_001.tif",
     "Maps/Tiles/Atlanta_split_google/tile_002_002.tif",
     "Maps/Tiles/Atlanta_split_google/tile_002_003.tif",
-    "Maps/Tiles/Atlanta_split_google/tile_002_005.tif",
-    "Maps/Tiles/Atlanta_split_google/tile_002_006.tif",
+    "Maps/Tiles/Atlanta_split_google/tile_002_004.tif",
 ]
 
 BASE_WEIGHTS = {
@@ -33,7 +53,25 @@ BASE_WEIGHTS = {
 
 PROMPTS = list(BASE_WEIGHTS.keys())
 DELTA_STEP = 0.02
-STEPS_EACH_SIDE = 25
+# Default steps each side for interactive runs (5 => 11 values per prompt => 55 configs)
+STEPS_EACH_SIDE = _env_int("STEPS_EACH_SIDE", 5)
+
+# Calibration resume/cache controls.
+# Change CALIBRATION_CACHE_KEY to start a fresh run folder.
+CALIBRATION_CACHE_KEY = os.environ.get("CALIBRATION_CACHE_KEY", "split_3tiles_steps5_v2")
+CALIBRATION_RESUME_FROM_CACHE = _env_bool("CALIBRATION_RESUME_FROM_CACHE", True)
+CALIBRATION_FORCE_RERUN = _env_bool("CALIBRATION_FORCE_RERUN", False)
+
+# Runtime/GPU controls.
+PREFER_CUDA = _env_bool("PREFER_CUDA", True)
+REQUIRE_CUDA = _env_bool("REQUIRE_CUDA", True)
+CUDA_VISIBLE_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+
+# Keep pipeline cache so reruns can reuse prior expensive intermediates.
+OVERWRITE_PIPELINE_CACHE = _env_bool("OVERWRITE_PIPELINE_CACHE", False)
+
+# Runtime estimate controls for progress output.
+ESTIMATED_MINUTES_PER_TILE = _env_float("ESTIMATED_MINUTES_PER_TILE", 5.0)
 
 
 def _json_default(value: Any) -> Any:
@@ -83,7 +121,27 @@ def _build_variants() -> list[dict[str, Any]]:
     return variants
 
 
+def _load_report_if_exists(report_path: Path) -> dict[str, Any] | None:
+    if not report_path.exists():
+        return None
+    try:
+        with report_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _build_worker_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if PREFER_CUDA:
+        env["CUDA_VISIBLE_DEVICES"] = CUDA_VISIBLE_DEVICES
+    # More stable CUDA memory behavior for long sweeps.
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:256")
+    return env
+
+
 def _run_worker(trial_name: str, tif_file: str, output_dir: Path, weights: dict[str, float]) -> dict[str, Any]:
+    requested_device = "cuda" if PREFER_CUDA else "auto"
     spec = {
         "trial_name": trial_name,
         "tif_file": tif_file,
@@ -96,6 +154,13 @@ def _run_worker(trial_name: str, tif_file: str, output_dir: Path, weights: dict[
             "build_prompt_strength_heatmaps": True,
             "coarse_to_fine_cell_px": 0,
             "sam_auto_max_total_masks": 5000,
+            "enable_pipeline_caching": True,
+            "overwrite_pipeline_cache": OVERWRITE_PIPELINE_CACHE,
+            "skip_mask_caching": _env_bool("SKIP_MASK_CACHING", True),
+            "skip_if_visualizations_exist": _env_bool("SKIP_IF_VISUALIZATIONS_EXIST", True),
+            "save_input_images": _env_bool("SAVE_INPUT_IMAGES", False),
+            "sam_device": requested_device,
+            "dino_device": requested_device,
             "output_dpi": 90,
             "dino_visualization_dpi": 90,
             "combined_visualization_max_dim": 900,
@@ -105,15 +170,34 @@ def _run_worker(trial_name: str, tif_file: str, output_dir: Path, weights: dict[
     }
 
     cmd = [sys.executable, str(CALIBRATE), "--worker", "--spec", json.dumps(spec, default=_json_default)]
-    completed = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+    started = perf_counter()
+    completed = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=_build_worker_env())
+    elapsed_seconds = perf_counter() - started
     return {
         "returncode": int(completed.returncode),
         "spec": spec,
+        "elapsed_seconds": elapsed_seconds,
     }
 
 
 def main() -> int:
-    output_root = PROJECT_ROOT / "results" / "contrastive_calibration"
+    # Hard-coded settings for interactive/local runs
+    global STEPS_EACH_SIDE
+    STEPS_EACH_SIDE = 5
+    per_config_minutes = ESTIMATED_MINUTES_PER_TILE
+
+    cuda_available = False
+    try:
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_available = False
+
+    if PREFER_CUDA and REQUIRE_CUDA and not cuda_available:
+        raise RuntimeError("CUDA was required but torch.cuda.is_available() is False. Set REQUIRE_CUDA=False to allow CPU fallback.")
+
+    output_root = PROJECT_ROOT / "results" / "contrastive_calibration" / CALIBRATION_CACHE_KEY
     output_root.mkdir(parents=True, exist_ok=True)
 
     variants = _build_variants()
@@ -122,12 +206,40 @@ def main() -> int:
     start_time = datetime.now()
     print(f"[INFO] Base weights: {BASE_WEIGHTS}")
     print(f"[INFO] Tiles: {TILES}")
+    print(
+        f"[INFO] Cache key: {CALIBRATION_CACHE_KEY} | "
+        f"resume={CALIBRATION_RESUME_FROM_CACHE} | force_rerun={CALIBRATION_FORCE_RERUN}"
+    )
+    print(
+        f"[INFO] CUDA preference: prefer_cuda={PREFER_CUDA}, require_cuda={REQUIRE_CUDA}, "
+        f"torch.cuda.is_available()={cuda_available}, CUDA_VISIBLE_DEVICES={CUDA_VISIBLE_DEVICES}"
+    )
     print(f"[INFO] One-at-a-time configs: {total_configs} ({len(PROMPTS)} prompts x {2 * STEPS_EACH_SIDE + 1} values)")
+    est_total_minutes = total_configs * len(TILES) * per_config_minutes
+    print(f"[INFO] Estimated total runtime (based on {per_config_minutes} min/config/tile): {_format_duration(est_total_minutes*60)}")
     print(f"[INFO] Total tile runs: {total_trials}")
     print(f"[INFO] Output root: {output_root}")
 
+    cached_tile_runs = 0
+    if CALIBRATION_RESUME_FROM_CACHE and not CALIBRATION_FORCE_RERUN:
+        for idx, _variant in enumerate(variants, start=1):
+            trial_folder = output_root / f"trial_{idx:03d}"
+            for tif_file in TILES:
+                tile_stem = _tile_stem(tif_file)
+                report_path = trial_folder / tile_stem / "annotation_iou" / f"{tile_stem}_iou_report.json"
+                if _load_report_if_exists(report_path) is not None:
+                    cached_tile_runs += 1
+
+    pending_tile_runs = max(0, total_trials - cached_tile_runs)
+    pending_est_minutes = pending_tile_runs * per_config_minutes
+    print(
+        f"[INFO] Cached tile runs found: {cached_tile_runs}/{total_trials} | "
+        f"estimated remaining runtime: {_format_duration(pending_est_minutes * 60)}"
+    )
+
     results: list[dict[str, Any]] = []
     started = datetime.now()
+    processed_tile_runs = 0
 
     for index, variant in enumerate(variants, start=1):
         prompt_name = variant["prompt"]
@@ -136,15 +248,41 @@ def main() -> int:
         trial_folder = output_root / trial_name_base
         trial_folder.mkdir(parents=True, exist_ok=True)
         per_tile_reports: list[dict[str, Any]] = []
+        trial_started = perf_counter()
 
         print(f"[INFO] [{index}/{total_configs}] Running config {trial_name_base} ({prompt_name}={weight:.3f})")
         for tile_index, tif_file in enumerate(TILES, start=1):
             tile_stem = _tile_stem(tif_file)
             tile_folder = trial_folder / tile_stem
             tile_folder.mkdir(parents=True, exist_ok=True)
-
-            run_result = _run_worker(tile_stem, tif_file, trial_folder, variant["weights"])
             report_path = tile_folder / "annotation_iou" / f"{tile_stem}_iou_report.json"
+
+            if CALIBRATION_RESUME_FROM_CACHE and not CALIBRATION_FORCE_RERUN:
+                cached_report = _load_report_if_exists(report_path)
+                if cached_report is not None:
+                    per_tile_reports.append(
+                        {
+                            "tile": tile_stem,
+                            "mean_iou": float(cached_report.get("mean_iou", 0.0)),
+                            "pixel_accuracy": float(cached_report.get("pixel_accuracy", 0.0)),
+                            "report_path": str(report_path),
+                            "cached": True,
+                            "elapsed_seconds": 0.0,
+                        }
+                    )
+                    processed_tile_runs += 1
+                    elapsed_tile = (datetime.now() - started).total_seconds()
+                    remaining_tile_runs = max(0, total_trials - processed_tile_runs)
+                    tile_eta_seconds = (elapsed_tile / processed_tile_runs) * remaining_tile_runs if processed_tile_runs else 0.0
+                    print(
+                        f"[INFO]   Tile {tile_index}/{len(TILES)} cache hit: {tile_stem} "
+                        f"mIoU={per_tile_reports[-1]['mean_iou']:.4f} | "
+                        f"overall remaining ~ {_format_duration(tile_eta_seconds)}"
+                    )
+                    continue
+
+            print(f"[INFO]   Starting tile {tile_index}/{len(TILES)}: {tile_stem} (config {index}/{total_configs}) at {datetime.now().isoformat()}")
+            run_result = _run_worker(tile_stem, tif_file, trial_folder, variant["weights"])
             if run_result["returncode"] != 0 or not report_path.exists():
                 print(f"[WARN] [{index}/{total_configs}] Tile failed or report missing for {tile_stem} in {trial_name_base}")
                 per_tile_reports.append(
@@ -153,8 +291,14 @@ def main() -> int:
                         "failed": True,
                         "returncode": run_result["returncode"],
                         "report_path": str(report_path),
+                        "elapsed_seconds": float(run_result.get("elapsed_seconds", 0.0)),
                     }
                 )
+                processed_tile_runs += 1
+                elapsed_tile = (datetime.now() - started).total_seconds()
+                remaining_tile_runs = max(0, total_trials - processed_tile_runs)
+                tile_eta_seconds = (elapsed_tile / processed_tile_runs) * remaining_tile_runs if processed_tile_runs else 0.0
+                print(f"[INFO]   Overall remaining after failed tile ~ {_format_duration(tile_eta_seconds)}")
                 continue
 
             with report_path.open("r", encoding="utf-8") as f:
@@ -165,9 +309,18 @@ def main() -> int:
                     "mean_iou": float(report.get("mean_iou", 0.0)),
                     "pixel_accuracy": float(report.get("pixel_accuracy", 0.0)),
                     "report_path": str(report_path),
+                    "cached": False,
+                    "elapsed_seconds": float(run_result.get("elapsed_seconds", 0.0)),
                 }
             )
-            print(f"[INFO]   Tile {tile_index}/{len(TILES)} done: mIoU={per_tile_reports[-1]['mean_iou']:.4f}")
+            processed_tile_runs += 1
+            elapsed_tile = (datetime.now() - started).total_seconds()
+            remaining_tile_runs = max(0, total_trials - processed_tile_runs)
+            tile_eta_seconds = (elapsed_tile / processed_tile_runs) * remaining_tile_runs if processed_tile_runs else 0.0
+            print(
+                f"[INFO]   Tile {tile_index}/{len(TILES)} done: mIoU={per_tile_reports[-1]['mean_iou']:.4f} | "
+                f"overall remaining ~ {_format_duration(tile_eta_seconds)}"
+            )
 
         valid_reports = [item for item in per_tile_reports if not item.get("failed")]
         summary = {
@@ -179,6 +332,9 @@ def main() -> int:
             "mean_iou_avg": float(mean([item["mean_iou"] for item in valid_reports])) if valid_reports else float("nan"),
             "mean_pixel_accuracy_avg": float(mean([item["pixel_accuracy"] for item in valid_reports])) if valid_reports else float("nan"),
             "per_tile_reports": per_tile_reports,
+            "cache_key": CALIBRATION_CACHE_KEY,
+            "used_cached_tiles": sum(1 for item in per_tile_reports if item.get("cached")),
+            "elapsed_seconds": float(perf_counter() - trial_started),
             "failed_tiles": len(per_tile_reports) - len(valid_reports),
         }
         results.append(summary)
