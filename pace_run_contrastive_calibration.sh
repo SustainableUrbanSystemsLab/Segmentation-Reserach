@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH -J contrastive_calibration        # Job name
-#SBATCH -A gts-pkastner3                  # PACE charge account
+#SBATCH -A gts-pkastner3                     # Your PACE charge account
 #SBATCH -N 1                              # Request 1 node
 #SBATCH --ntasks-per-node=1               # One task
 #SBATCH --cpus-per-task=4                 # CPU cores for data loading
 #SBATCH --mem=32G                         # Memory
-#SBATCH --gres=gpu:V100:1                 # Request 1 V100 GPU (Swap to H200/A100 if preferred)
-#SBATCH -t 01:00:00                       # Walltime limit (hh:mm:ss)
+#SBATCH --gres=gpu:V100:1                 # Request 1 V100 GPU
+#SBATCH -t 04:00:00                       # Walltime limit (hh:mm:ss)
 #SBATCH -q inferno                        # Queue
 #SBATCH -o logs/job_%j.out                # Slurm standard output log
 #SBATCH -e logs/job_%j.err                # Slurm standard error log
@@ -16,21 +16,21 @@
 # ==========================================
 module purge
 module load gcc/11.3.1
+module load anaconda3                     # Exposes conda commands inside Slurm cleanly
 
-# Initialize Conda for headless shell execution
-source ~/.conda/etc/profile.d/conda.sh || source ~/miniconda3/etc/profile.d/conda.sh
+# Initialize Conda for headless shell execution safely
+source /usr/local/pace-apps/spack/packages/linux-rhel8-zen2/gcc-11.3.1/anaconda3-2022.05-tw3uiww7g7sc7wunw7atshwkyfxtw7gn/etc/profile.d/conda.sh || source ~/.conda/etc/profile.d/conda.sh
 conda activate seg_env
 
 # ==========================================
 # 2. SEPARATE CODE PATH FROM OUTPUT PATHS
 # ==========================================
-# Code Directory (Where your repository lives)
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Securely fallback to current working directory if not run by Slurm scheduler
+PROJECT_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 cd "$PROJECT_ROOT"
 
-# Target Output Directory (Massive high-speed scratch space)
-PACE_USER="ibaracskay3"
-OUTPUT_BASE_DIR="/storage/scratch1/${PACE_USER}/segmentation_outputs"
+# Target Output Directory (Leverages the secure PACE scratch symlink)
+OUTPUT_BASE_DIR="$HOME/scratch/segmentation_outputs"
 
 # Ensure target directories exist before execution
 mkdir -p "$PROJECT_ROOT/logs"
@@ -78,10 +78,10 @@ if [ "$1" = "single" ]; then
         TILE_STEM="$2"
     fi
 
-    # Read the raw source TIF directly from your code/data repository
+    # Read the raw source TIF directly from your repository location
     SOURCE_TIF="${PROJECT_ROOT}/Maps/Tiles/Atlanta_split_google/${TILE_STEM}.tif"
     
-    # Route the massive visualization previews straight to Scratch
+    # Route the heavy visualization outputs directly to Scratch space
     OUT_DIR="${OUTPUT_BASE_DIR}/Results/yoloseg_preview_${TILE_STEM}"
     mkdir -p "$OUT_DIR"
 
@@ -89,7 +89,7 @@ if [ "$1" = "single" ]; then
     echo "[INFO] Source Map: ${SOURCE_TIF}"
     echo "[INFO] Output Destination: ${OUT_DIR}"
 
-    # Runs using relative weights from project repo, but saves outputs to scratch
+    # Runs python module tracking context relative to your workspace root
     "$PYTHON_EXE" -m yoloseg_pipeline.predict \
         --weights Results/yoloseg/wind_comfort_seg-2/weights/best.pt \
         --source "$SOURCE_TIF" \
