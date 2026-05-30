@@ -15,12 +15,29 @@
 # 1. ENVIRONMENT & CLUSTER MODULE SETUP
 # ==========================================
 module purge
-module load gcc/11.3.1
-module load anaconda3                     # Exposes conda commands inside Slurm cleanly
+module load gcc/11.3.1 || true
 
-# Initialize Conda for headless shell execution safely
-source /usr/local/pace-apps/spack/packages/linux-rhel8-zen2/gcc-11.3.1/anaconda3-2022.05-tw3uiww7g7sc7wunw7atshwkyfxtw7gn/etc/profile.d/conda.sh || source ~/.conda/etc/profile.d/conda.sh
-conda activate seg_env
+# Try loading anaconda module if available (harmless if absent)
+module load anaconda3 || true
+
+# Initialize Conda for headless shell execution safely. We try multiple
+# locations so the script works on different cluster images and user setups.
+if command -v conda >/dev/null 2>&1; then
+    conda activate seg_env || true
+else
+    if [ -f "/usr/local/pace-apps/spack/packages/linux-rhel8-zen2/gcc-11.3.1/anaconda3-2022.05-tw3uiww7g7sc7wunw7atshwkyfxtw7gn/etc/profile.d/conda.sh" ]; then
+        # shellcheck source=/dev/null
+        source "/usr/local/pace-apps/spack/packages/linux-rhel8-zen2/gcc-11.3.1/anaconda3-2022.05-tw3uiww7g7sc7wunw7atshwkyfxtw7gn/etc/profile.d/conda.sh" && conda activate seg_env || true
+    elif [ -f "$HOME/.conda/etc/profile.d/conda.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$HOME/.conda/etc/profile.d/conda.sh" && conda activate seg_env || true
+    elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$HOME/miniconda3/etc/profile.d/conda.sh" && conda activate seg_env || true
+    else
+        echo "[WARN] No conda activation script found; continuing with PATH python if available"
+    fi
+fi
 
 # ==========================================
 # 2. SEPARATE CODE PATH FROM OUTPUT PATHS
@@ -37,8 +54,11 @@ mkdir -p "$PROJECT_ROOT/logs"
 mkdir -p "${OUTPUT_BASE_DIR}/results"
 mkdir -p "${OUTPUT_BASE_DIR}/Results"
 
-# Absolute path to your active environment's Python binary
-PYTHON_EXE="/storage/home/hcoda1/3/ibaracskay3/.conda/envs/seg_env/bin/python"
+# Prefer the active environment's python, otherwise fall back to the hardcoded path.
+PYTHON_EXE="$(command -v python || true)"
+if [ -z "$PYTHON_EXE" ]; then
+    PYTHON_EXE="/storage/home/hcoda1/3/ibaracskay3/.conda/envs/seg_env/bin/python"
+fi
 
 # GPU / CUDA settings
 export CUDA_VISIBLE_DEVICES=0
@@ -80,27 +100,32 @@ if [ "$1" = "single" ]; then
 
     # Read the raw source TIF directly from your repository location
     SOURCE_TIF="${PROJECT_ROOT}/Maps/Tiles/Atlanta_split_google/${TILE_STEM}.tif"
-    
+
     # Route the heavy visualization outputs directly to Scratch space
-    OUT_DIR="${OUTPUT_BASE_DIR}/Results/yoloseg_preview_${TILE_STEM}"
+    OUT_DIR="${OUTPUT_BASE_DIR}/Results/dino_sam_preview_${TILE_STEM}"
     mkdir -p "$OUT_DIR"
 
-    echo "[INFO] Running single-tile prediction for ${TILE_STEM}"
+    echo "[INFO] Running single-tile DINO+SAM pipeline for ${TILE_STEM}"
     echo "[INFO] Source Map: ${SOURCE_TIF}"
     echo "[INFO] Output Destination: ${OUT_DIR}"
 
-    # Runs python module tracking context relative to your workspace root
-    "$PYTHON_EXE" -m yoloseg_pipeline.predict \
-        --weights Results/yoloseg/wind_comfort_seg-2/weights/best.pt \
-        --source "$SOURCE_TIF" \
-        --output-dir "$OUT_DIR" \
-        --imgsz 1024 \
-        --conf 0.25 \
-        --tile-size 1024 \
-        --tile-overlap 128
+    # Export the per-process override so get_satellite.py can detect the chosen tif
+    export SEGMENTATION_TIF_FILE="$SOURCE_TIF"
+
+    # Run the runs/get_satellite.py inside a small Python wrapper so we can set
+    # models.config.results_dir to our scratch OUT_DIR before executing the module.
+    "$PYTHON_EXE" - <<PYTHON
+import sys
+from pathlib import Path
+sys.path.insert(0, "$PROJECT_ROOT")
+from models import config as cfg
+cfg.results_dir = Path("$OUT_DIR")
+import runpy
+runpy.run_path(str(Path("$PROJECT_ROOT") / "runs" / "get_satellite.py"), run_name="__main__")
+PYTHON
 
     EXIT_CODE=$?
-    echo "[INFO] Single-tile run finished with exit code $EXIT_CODE"
+    echo "[INFO] Single DINO+SAM run finished with exit code $EXIT_CODE"
     exit $EXIT_CODE
 fi
 
