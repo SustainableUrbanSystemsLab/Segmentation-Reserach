@@ -17,27 +17,9 @@
 module purge
 module load gcc/11.3.1 || true
 
-# Try loading anaconda module if available (harmless if absent)
+# Keep module load best-effort only. Some PACE shell initializations emit
+# harmless conda warnings from Lmod when conda is unavailable.
 module load anaconda3 || true
-
-# Initialize Conda for headless shell execution safely. We try multiple
-# locations so the script works on different cluster images and user setups.
-if command -v conda >/dev/null 2>&1; then
-    conda activate seg_env || true
-else
-    if [ -f "/usr/local/pace-apps/spack/packages/linux-rhel8-zen2/gcc-11.3.1/anaconda3-2022.05-tw3uiww7g7sc7wunw7atshwkyfxtw7gn/etc/profile.d/conda.sh" ]; then
-        # shellcheck source=/dev/null
-        source "/usr/local/pace-apps/spack/packages/linux-rhel8-zen2/gcc-11.3.1/anaconda3-2022.05-tw3uiww7g7sc7wunw7atshwkyfxtw7gn/etc/profile.d/conda.sh" && conda activate seg_env || true
-    elif [ -f "$HOME/.conda/etc/profile.d/conda.sh" ]; then
-        # shellcheck source=/dev/null
-        source "$HOME/.conda/etc/profile.d/conda.sh" && conda activate seg_env || true
-    elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-        # shellcheck source=/dev/null
-        source "$HOME/miniconda3/etc/profile.d/conda.sh" && conda activate seg_env || true
-    else
-        echo "[WARN] No conda activation script found; continuing with PATH python if available"
-    fi
-fi
 
 # ==========================================
 # 2. SEPARATE CODE PATH FROM OUTPUT PATHS
@@ -54,10 +36,11 @@ mkdir -p "$PROJECT_ROOT/logs"
 mkdir -p "${OUTPUT_BASE_DIR}/results"
 mkdir -p "${OUTPUT_BASE_DIR}/Results"
 
-# Prefer the active environment's python, otherwise fall back to the hardcoded path.
-PYTHON_EXE="$(command -v python || true)"
-if [ -z "$PYTHON_EXE" ]; then
-    PYTHON_EXE="/storage/home/hcoda1/3/ibaracskay3/.conda/envs/seg_env/bin/python"
+# Prefer an explicit env python path to avoid depending on `conda activate` in batch.
+DEFAULT_ENV_PYTHON="$HOME/.conda/envs/seg_env/bin/python"
+PYTHON_EXE="${PYTHON_EXE:-$DEFAULT_ENV_PYTHON}"
+if [ ! -x "$PYTHON_EXE" ]; then
+    PYTHON_EXE="$(command -v python || true)"
 fi
 
 # GPU / CUDA settings
@@ -81,10 +64,33 @@ echo "[INFO] Code Repository Root: ${PROJECT_ROOT}"
 echo "[INFO] High-Capacity Scratch Output: ${OUTPUT_BASE_DIR}"
 echo "[INFO] Calibration Output Target: ${CALIBRATION_OUTPUT_DIR}"
 
-if [ ! -f "$PYTHON_EXE" ]; then
+if [ ! -x "$PYTHON_EXE" ]; then
     echo "[ERROR] Python executable not found at ${PYTHON_EXE}"
+    echo "[HINT] Export PYTHON_EXE to your env python path, e.g. $HOME/.conda/envs/seg_env/bin/python"
     exit 1
 fi
+
+echo "[INFO] Python executable: ${PYTHON_EXE}"
+
+# Tile location roots for single-tile runs.
+# Priority:
+# 1) explicit TILE_BASE_DIR env var
+# 2) local repo path
+# 3) PACE shared project path
+LOCAL_TILE_BASE="${PROJECT_ROOT}/Maps/Tiles/Atlanta_split_google"
+PACE_TILE_BASE="/storage/project/r-pkastner3-0/ibaracskay3/Segmentation-Reserach-Manual/Maps/Tiles/Atlanta_split_google"
+
+if [ -n "${TILE_BASE_DIR:-}" ]; then
+    RESOLVED_TILE_BASE="$TILE_BASE_DIR"
+elif [ -d "$LOCAL_TILE_BASE" ]; then
+    RESOLVED_TILE_BASE="$LOCAL_TILE_BASE"
+elif [ -d "$PACE_TILE_BASE" ]; then
+    RESOLVED_TILE_BASE="$PACE_TILE_BASE"
+else
+    RESOLVED_TILE_BASE="$LOCAL_TILE_BASE"
+fi
+
+echo "[INFO] Tile base directory: ${RESOLVED_TILE_BASE}"
 
 # ==========================================
 # 3. RUN MODES (SINGLE TILE VS FULL RUN)
@@ -92,14 +98,27 @@ fi
 
 # Mode A: Single-Tile Prediction Mode
 if [ "$1" = "single" ]; then
-    if [ -z "$2" ]; then
-        TILE_STEM="tile_002_003"
+    TILE_INPUT="${2:-tile_002_003}"
+
+    # Accept either a full tif path or a tile stem resolved against TILE_BASE_DIR.
+    if [[ "$TILE_INPUT" == *.tif ]] || [[ "$TILE_INPUT" == */* ]]; then
+        SOURCE_TIF="$TILE_INPUT"
     else
-        TILE_STEM="$2"
+        TILE_STEM="$TILE_INPUT"
+        SOURCE_TIF="${RESOLVED_TILE_BASE}/${TILE_STEM}.tif"
     fi
 
-    # Read the raw source TIF directly from your repository location
-    SOURCE_TIF="${PROJECT_ROOT}/Maps/Tiles/Atlanta_split_google/${TILE_STEM}.tif"
+    if [ ! -f "$SOURCE_TIF" ]; then
+        echo "[ERROR] Could not locate source tif for input: ${TILE_INPUT}"
+        echo "[INFO] Expected path: ${SOURCE_TIF}"
+        echo "[INFO] Current tile base: ${RESOLVED_TILE_BASE}"
+        echo "[HINT] Pass a full tif path as the second argument, e.g.:"
+        echo "[HINT] sbatch pace_run_contrastive_calibration.sh single /path/to/tile_002_003.tif"
+        echo "[HINT] Or set TILE_BASE_DIR to your tiles directory before running."
+        exit 2
+    fi
+
+    TILE_STEM="$(basename "$SOURCE_TIF" .tif)"
 
     # Route the heavy visualization outputs directly to Scratch space
     OUT_DIR="${OUTPUT_BASE_DIR}/Results/dino_sam_preview_${TILE_STEM}"
