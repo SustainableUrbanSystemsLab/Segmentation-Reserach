@@ -17,9 +17,43 @@
 module purge
 module load gcc/11.3.1 || true
 
-# Keep module load best-effort only. Some PACE shell initializations emit
-# harmless conda warnings from Lmod when conda is unavailable.
+# Conda environment setup (required for pipeline dependencies).
+SEG_CONDA_ENV="${SEG_CONDA_ENV:-seg_env}"
+
+# 1) Try to expose conda via module first.
 module load anaconda3 || true
+
+# 2) If conda is still unavailable, source common conda.sh locations.
+if ! command -v conda >/dev/null 2>&1; then
+    CONDA_SH_CANDIDATES=(
+        "$HOME/.conda/etc/profile.d/conda.sh"
+        "$HOME/miniconda3/etc/profile.d/conda.sh"
+        "/usr/local/pace-apps/spack/packages/linux-rhel8-zen2/gcc-11.3.1/anaconda3-2022.05-tw3uiww7g7sc7wunw7atshwkyfxtw7gn/etc/profile.d/conda.sh"
+    )
+    for CONDA_SH in "${CONDA_SH_CANDIDATES[@]}"; do
+        if [ -f "$CONDA_SH" ]; then
+            # shellcheck source=/dev/null
+            source "$CONDA_SH"
+            break
+        fi
+    done
+fi
+
+# 3) Final check and activation (fail fast if conda env cannot be activated).
+if ! command -v conda >/dev/null 2>&1; then
+    echo "[ERROR] conda command not found after module load and conda.sh probing"
+    echo "[HINT] Ensure Anaconda/Miniconda is installed on PACE and accessible in batch jobs"
+    exit 1
+fi
+
+# In non-interactive shells, the hook makes `conda activate` reliable.
+eval "$(conda shell.bash hook)" || true
+
+if ! conda activate "$SEG_CONDA_ENV"; then
+    echo "[ERROR] Failed to activate conda environment: ${SEG_CONDA_ENV}"
+    conda info --envs || true
+    exit 1
+fi
 
 # ==========================================
 # 2. SEPARATE CODE PATH FROM OUTPUT PATHS
@@ -36,12 +70,8 @@ mkdir -p "$PROJECT_ROOT/logs"
 mkdir -p "${OUTPUT_BASE_DIR}/results"
 mkdir -p "${OUTPUT_BASE_DIR}/Results"
 
-# Prefer an explicit env python path to avoid depending on `conda activate` in batch.
-DEFAULT_ENV_PYTHON="$HOME/.conda/envs/seg_env/bin/python"
-PYTHON_EXE="${PYTHON_EXE:-$DEFAULT_ENV_PYTHON}"
-if [ ! -x "$PYTHON_EXE" ]; then
-    PYTHON_EXE="$(command -v python || true)"
-fi
+# Use the python from the activated conda environment.
+PYTHON_EXE="$(command -v python || true)"
 
 # GPU / CUDA settings
 export CUDA_VISIBLE_DEVICES=0
@@ -66,11 +96,12 @@ echo "[INFO] Calibration Output Target: ${CALIBRATION_OUTPUT_DIR}"
 
 if [ ! -x "$PYTHON_EXE" ]; then
     echo "[ERROR] Python executable not found at ${PYTHON_EXE}"
-    echo "[HINT] Export PYTHON_EXE to your env python path, e.g. $HOME/.conda/envs/seg_env/bin/python"
+    echo "[HINT] Conda activation may have failed; verify env '${SEG_CONDA_ENV}' contains python"
     exit 1
 fi
 
 echo "[INFO] Python executable: ${PYTHON_EXE}"
+echo "[INFO] Active conda env: ${SEG_CONDA_ENV}"
 
 # Tile location roots for single-tile runs.
 # Priority:
