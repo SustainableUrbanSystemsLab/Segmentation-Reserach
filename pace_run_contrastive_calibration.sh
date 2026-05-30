@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH -J contrastive_calibration        # Job name
-#SBATCH -A [YOUR_PACE_ACCOUNT]            # Your PACE charge account (e.g., gts-pi_name)
+#SBATCH -A gts-pkastner3                  # PACE charge account
 #SBATCH -N 1                              # Request 1 node
 #SBATCH --ntasks-per-node=1               # One task
 #SBATCH --cpus-per-task=4                 # CPU cores for data loading
 #SBATCH --mem=32G                         # Memory
 #SBATCH --gres=gpu:V100:1                 # Request 1 V100 GPU (Swap to H200/A100 if preferred)
-#SBATCH -t 04:00:00                       # Walltime limit (hh:mm:ss)
+#SBATCH -t 01:00:00                       # Walltime limit (hh:mm:ss)
 #SBATCH -q inferno                        # Queue
 #SBATCH -o logs/job_%j.out                # Slurm standard output log
 #SBATCH -e logs/job_%j.err                # Slurm standard error log
