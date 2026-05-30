@@ -1,0 +1,18 @@
+{
+  "source_dir": "Maps/Tiles/Atlanta_split_google",
+  "output_dir": "data/yoloseg_windcomfort_rgb",
+  "val_ratio": 0.2,
+  "seed": 42,
+  "overwrite": true,
+  "skip_empty_label_tiles": true,
+  "train_tiles": [
+    "tile_002_000",
+    "tile_002_001",
+    "tile_002_002",
+    "tile_002_004",
+    "tile_002_005"
+  ],
+  "test_tiles": [
+    "tile_002_003"
+  ]
+}

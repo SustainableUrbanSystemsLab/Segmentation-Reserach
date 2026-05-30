@@ -8,3 +8,6 @@ planet.local.json
 /__pycache__
 /Maps
 /visualizations/__pycache__
+/data/yoloseg_windcomfort_rgb/images
+/data/yoloseg_windcomfort_rgb
+*.pyc

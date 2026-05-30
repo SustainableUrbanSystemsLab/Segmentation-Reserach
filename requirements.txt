@@ -3,6 +3,7 @@ numpy
 scipy
 matplotlib
 Pillow
+pi-heif
 requests
 pyproj
 rasterio
