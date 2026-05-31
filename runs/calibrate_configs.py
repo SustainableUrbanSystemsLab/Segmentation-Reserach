@@ -310,6 +310,11 @@ def _worker_main(spec: dict[str, Any]) -> int:
     prompts_module.AVAILABLE_PROMPTS = _deep_copy_prompt_map(prompts_module)
     _apply_overrides(cfg, prompts_module, spec["overrides"])
 
+    print(
+        f"[WORKER] trial={trial_name} | start | "
+        f"tif={tif_file} | output_dir={trial_dir}"
+    )
+
     cuda_available = bool(torch.cuda.is_available())
     cuda_device = torch.cuda.current_device() if cuda_available else None
     cuda_name = torch.cuda.get_device_name(cuda_device) if cuda_available else None
@@ -336,7 +341,9 @@ def _worker_main(spec: dict[str, Any]) -> int:
 
     filtered_output = _FilteredOutput(sys.stdout)
     with redirect_stdout(filtered_output), redirect_stderr(filtered_output):
+        print(f"[WORKER] trial={trial_name} | entering get_satellite.py")
         runpy.run_path(str(RUNS_DIR / "get_satellite.py"), run_name="__main__")
+        print(f"[WORKER] trial={trial_name} | get_satellite.py returned")
 
     combined_mask_outputs = sorted((trial_dir / "results" / "combined_masks").glob("*.png"))
     if combined_mask_outputs:
@@ -364,6 +371,7 @@ def _worker_main(spec: dict[str, Any]) -> int:
         json.dump(summary, f, indent=2, default=_json_default)
 
     print(json.dumps(summary, indent=2))
+    print(f"[WORKER] trial={trial_name} | complete")
     return 0
 
 
@@ -495,7 +503,12 @@ def _driver_main(args: argparse.Namespace) -> int:
                 },
             }
             command = [args.python_exe, str(Path(__file__).resolve()), "--worker", "--spec", json.dumps(spec, default=_json_default)]
+            print(f"[INFO] [{index}/{total}] Launching worker for {trial_name}")
             completed = subprocess.run(command, cwd=str(PROJECT_ROOT))
+            print(
+                f"[INFO] [{index}/{total}] Worker exited for {trial_name} "
+                f"with returncode={completed.returncode}"
+            )
             if completed.returncode != 0:
                 summary = {
                     "trial_name": trial_name,

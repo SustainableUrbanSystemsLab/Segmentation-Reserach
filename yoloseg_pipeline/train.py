@@ -84,6 +84,8 @@ def main() -> int:
     args = _parse_args()
     _preflight_dependencies()
 
+    print(f"[INFO] Resolved training workers: {args.workers}")
+
     if args.allow_large_images:
         Image.MAX_IMAGE_PIXELS = None
 

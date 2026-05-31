@@ -117,7 +117,15 @@ from models.sam_processing import (
 )
 
 
+def _resolved_cpu_workers() -> int:
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm_cpus and slurm_cpus.isdigit():
+        return max(1, int(slurm_cpus))
+    return max(1, os.cpu_count() or 1)
+
+
 script_start = perf_counter()
+print(f"[INFO] Resolved CPU workers: {_resolved_cpu_workers()}")
 log_stage("Starting satellite sidewalk segmentation pipeline")
 
 
@@ -2218,8 +2226,10 @@ def _build_prompt_strength_heatmap(
     if not np.all(covered):
         from scipy.ndimage import distance_transform_edt
 
+        print(f"[INFO] Prompt strength heatmap fill starting for {prompt_name}: uncovered pixels need nearest-neighbor fill")
         _, indices = distance_transform_edt(~covered, return_indices=True)
         score_map = score_map[tuple(indices)]
+        print(f"[INFO] Prompt strength heatmap fill finished for {prompt_name}")
 
     return score_map, covered
 
