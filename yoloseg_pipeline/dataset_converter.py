@@ -21,6 +21,7 @@ from yoloseg_pipeline.common import (
     write_dataset_yaml,
     write_yolo_label_file,
     dataset_summary_path,
+    annotation_shapes_to_pixel_polygons,
 )
 
 
@@ -51,6 +52,18 @@ def _parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Skip tiles that have no valid wind-comfort labels after invalid annotations are removed.",
+    )
+    parser.add_argument(
+        "--tile-size",
+        type=int,
+        default=None,
+        help="Optional size to slice tiles into overlapping chips (e.g. 1024 or 1280). If omitted, saves full tiles.",
+    )
+    parser.add_argument(
+        "--tile-overlap",
+        type=int,
+        default=128,
+        help="Pixel overlap between adjacent sliced chips. Only used if --tile-size is set.",
     )
     parser.add_argument("--overwrite", action="store_true", help="Rebuild the dataset even if files already exist.")
     return parser.parse_args()
@@ -178,6 +191,128 @@ def _copy_tile(pair: TilePair, output_dir: Path, split: str, skip_empty_label_ti
     }
 
 
+def _tile_ranges(length: int, tile_size: int, overlap: int) -> list[tuple[int, int]]:
+    if length <= tile_size:
+        return [(0, length)]
+    step = max(1, tile_size - overlap)
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    while start < length:
+        end = min(length, start + tile_size)
+        ranges.append((start, end))
+        if end >= length:
+            break
+        start += step
+    return ranges
+
+
+def _slice_tile(
+    pair: TilePair,
+    output_dir: Path,
+    split: str,
+    tile_size: int,
+    overlap: int,
+    skip_empty_label_tiles: bool,
+) -> list[dict[str, object]]:
+    records = []
+    rgb = load_rgb_from_tif(pair.image_path)
+    height, width = rgb.shape[:2]
+    full_polygons = annotation_shapes_to_pixel_polygons(pair.annotation_path)
+
+    y_ranges = _tile_ranges(height, tile_size, overlap)
+    x_ranges = _tile_ranges(width, tile_size, overlap)
+
+    for y0, y1 in y_ranges:
+        for x0, x1 in x_ranges:
+            chip_rgb = rgb[y0:y1, x0:x1]
+            if chip_rgb.size == 0:
+                continue
+
+            chip_stem = f"{pair.stem}_crop_{y0}_{x0}"
+            image_out = output_dir / "images" / split / f"{chip_stem}.png"
+            label_out = output_dir / "labels" / split / f"{chip_stem}.txt"
+
+            chip_segments: list[tuple[int, list[float]]] = []
+            class_counts = {name: 0 for name in CLASS_NAMES}
+            class_area_px2 = {name: 0.0 for name in CLASS_NAMES}
+
+            for class_index, points in full_polygons:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
+
+                if max_x < x0 or min_x > x1 or max_y < y0 or min_y > y1:
+                    continue
+
+                local_points: list[tuple[float, float]] = []
+                for x, y in points:
+                    cx = min(max(x, float(x0)), float(x1))
+                    cy = min(max(y, float(y0)), float(y1))
+                    lx = cx - float(x0)
+                    ly = cy - float(y0)
+                    local_points.append((lx, ly))
+
+                unique_points: list[tuple[float, float]] = []
+                for lp in local_points:
+                    if not unique_points or lp != unique_points[-1]:
+                        unique_points.append(lp)
+                if len(unique_points) > 1 and unique_points[0] == unique_points[-1]:
+                    unique_points.pop()
+
+                if len(unique_points) < 3:
+                    continue
+
+                area = 0.0
+                for i in range(len(unique_points)):
+                    x_i, y_i = unique_points[i]
+                    x_next, y_next = unique_points[(i + 1) % len(unique_points)]
+                    area += x_i * y_next - x_next * y_i
+                area = abs(area) * 0.5
+
+                if area < 10.0:
+                    continue
+
+                chip_w = float(x1 - x0)
+                chip_h = float(y1 - y0)
+                normalized_points: list[float] = []
+                for lx, ly in unique_points:
+                    normalized_points.extend([lx / chip_w, ly / chip_h])
+
+                if len(normalized_points) >= 6:
+                    chip_segments.append((class_index, normalized_points))
+                    class_name = CLASS_NAMES[class_index]
+                    class_counts[class_name] += 1
+                    class_area_px2[class_name] += area
+
+            if skip_empty_label_tiles and not chip_segments:
+                continue
+
+            save_rgb_png(chip_rgb, image_out)
+
+            label_out.parent.mkdir(parents=True, exist_ok=True)
+            lines = []
+            for class_index, pts in chip_segments:
+                point_text = " ".join(f"{v:.6f}" for v in pts)
+                lines.append(f"{class_index} {point_text}")
+            label_out.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+            records.append({
+                "stem": chip_stem,
+                "split": split,
+                "image_path": str(image_out),
+                "label_path": str(label_out),
+                "annotation_path": str(pair.annotation_path),
+                "image_source_path": str(pair.image_path),
+                "label_count": len(chip_segments),
+                "class_counts": class_counts,
+                "class_area_px2": class_area_px2,
+                "image_shape": [int(chip_rgb.shape[0]), int(chip_rgb.shape[1])],
+            })
+
+    return records
+
+
 def convert_dataset(
     source_dir: Path,
     output_dir: Path,
@@ -188,6 +323,8 @@ def convert_dataset(
     val_tiles: str | None = None,
     test_tiles: str | None = None,
     skip_empty_label_tiles: bool = True,
+    tile_size: int | None = None,
+    tile_overlap: int = 128,
 ) -> Path:
     if output_dir.exists() and overwrite:
         shutil.rmtree(output_dir)
@@ -223,14 +360,24 @@ def convert_dataset(
     class_area_px2 = {name: 0.0 for name in CLASS_NAMES}
     for split_name, split_items_list in (("train", train_items), ("val", val_items), ("test", test_items)):
         for pair in split_items_list:
-            copied = _copy_tile(pair, output_dir, split_name, skip_empty_label_tiles)
-            if copied is not None:
-                records.append(copied)
-                copied_counts = copied.get("class_counts", {})
-                copied_areas = copied.get("class_area_px2", {})
-                for class_name in CLASS_NAMES:
-                    class_counts[class_name] += int(copied_counts.get(class_name, 0))
-                    class_area_px2[class_name] += float(copied_areas.get(class_name, 0.0))
+            if tile_size is not None:
+                sliced_records = _slice_tile(pair, output_dir, split_name, tile_size, tile_overlap, skip_empty_label_tiles)
+                for rec in sliced_records:
+                    records.append(rec)
+                    copied_counts = rec.get("class_counts", {})
+                    copied_areas = rec.get("class_area_px2", {})
+                    for class_name in CLASS_NAMES:
+                        class_counts[class_name] += int(copied_counts.get(class_name, 0))
+                        class_area_px2[class_name] += float(copied_areas.get(class_name, 0.0))
+            else:
+                copied = _copy_tile(pair, output_dir, split_name, skip_empty_label_tiles)
+                if copied is not None:
+                    records.append(copied)
+                    copied_counts = copied.get("class_counts", {})
+                    copied_areas = copied.get("class_area_px2", {})
+                    for class_name in CLASS_NAMES:
+                        class_counts[class_name] += int(copied_counts.get(class_name, 0))
+                        class_area_px2[class_name] += float(copied_areas.get(class_name, 0.0))
 
     yaml_path = write_dataset_yaml(output_dir, include_test=bool(test_items))
     summary = {
@@ -244,6 +391,9 @@ def convert_dataset(
         "val_tiles": sorted(val_tile_names) if val_tile_names else None,
         "test_tiles": sorted(test_tile_names) if test_tile_names else None,
         "skip_empty_label_tiles": skip_empty_label_tiles,
+        "tile_size": tile_size,
+        "tile_overlap": tile_overlap,
+        "sliced_chips_count": len(records) if tile_size is not None else None,
         "class_counts": class_counts,
         "class_area_px2": class_area_px2,
         "records": records,
@@ -274,6 +424,9 @@ def main() -> int:
         val_tiles = config.get("val_tiles", args.val_tiles)
         test_tiles = config.get("test_tiles", args.test_tiles)
         skip_empty_label_tiles = bool(config.get("skip_empty_label_tiles", args.skip_empty_label_tiles))
+        tile_size_val = config.get("tile_size", args.tile_size)
+        tile_size = int(tile_size_val) if tile_size_val is not None else None
+        tile_overlap = int(config.get("tile_overlap", args.tile_overlap))
     else:
         source_dir = Path(args.source_dir)
         output_dir = Path(args.output_dir)
@@ -284,6 +437,8 @@ def main() -> int:
         val_tiles = args.val_tiles
         test_tiles = args.test_tiles
         skip_empty_label_tiles = bool(args.skip_empty_label_tiles)
+        tile_size = int(args.tile_size) if args.tile_size is not None else None
+        tile_overlap = int(args.tile_overlap)
 
     yaml_path = convert_dataset(
         source_dir=source_dir,
@@ -295,6 +450,8 @@ def main() -> int:
         val_tiles=val_tiles,
         test_tiles=test_tiles,
         skip_empty_label_tiles=skip_empty_label_tiles,
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
     )
     print(f"[INFO] Wrote YOLO dataset config: {yaml_path}")
     return 0

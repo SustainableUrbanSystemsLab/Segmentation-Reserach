@@ -152,6 +152,45 @@ def annotation_shapes_to_yolo_segments(annotation_path: Path) -> list[tuple[int,
     return segments
 
 
+def annotation_shapes_to_pixel_polygons(annotation_path: Path) -> list[tuple[int, list[tuple[float, float]]]]:
+    width, height, shapes = _read_json_shapes(annotation_path)
+    polygons: list[tuple[int, list[tuple[float, float]]]] = []
+
+    for shape in shapes:
+        if not isinstance(shape, dict):
+            continue
+
+        raw_label = str(shape.get("label", ""))
+        normalized_label = normalize_label(raw_label)
+        if normalized_label not in CLASS_TO_INDEX:
+            continue
+
+        shape_type = str(shape.get("shape_type", "polygon")).lower()
+        if shape_type not in {"polygon", "polyline"}:
+            continue
+
+        points = shape.get("points", [])
+        if not isinstance(points, list):
+            continue
+
+        cleaned_points: list[tuple[float, float]] = []
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            cleaned_points.append(_clamp_point(point[0], point[1], width, height))
+
+        if len(cleaned_points) < 3:
+            continue
+
+        if shape_type == "polyline" and cleaned_points[0] != cleaned_points[-1]:
+            cleaned_points.append(cleaned_points[0])
+
+        polygons.append((CLASS_TO_INDEX[normalized_label], cleaned_points))
+
+    return polygons
+
+
+
 def write_yolo_label_file(annotation_path: Path, output_path: Path) -> int:
     segments = annotation_shapes_to_yolo_segments(annotation_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

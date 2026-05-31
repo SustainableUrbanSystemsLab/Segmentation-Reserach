@@ -100,9 +100,9 @@ def _predict_tiled(
             if chip.size == 0:
                 continue
 
-            result = model.predict(chip, imgsz=imgsz, conf=conf, verbose=False)[0]
+            result = model.predict(chip, imgsz=imgsz, conf=conf, verbose=False, retina_masks=True)[0]
             if (result.masks is None or result.boxes is None or len(result.boxes) == 0) and fallback_conf >= 0.0:
-                result = model.predict(chip, imgsz=imgsz, conf=min(conf, fallback_conf), verbose=False)[0]
+                result = model.predict(chip, imgsz=imgsz, conf=min(conf, fallback_conf), verbose=False, retina_masks=True)[0]
 
             if result.masks is None or result.boxes is None or len(result.boxes) == 0:
                 continue

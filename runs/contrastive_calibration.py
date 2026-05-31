@@ -113,18 +113,31 @@ def _tile_stem(tile_path: str) -> str:
 def _build_weight_values(prompt_name: str) -> list[float]:
     base_value = BASE_WEIGHTS[prompt_name]
     values = []
-    for step in range(-STEPS_EACH_SIDE, STEPS_EACH_SIDE + 1):
-        value = round(base_value + (step * DELTA_STEP), 3)
+    if STEPS_EACH_SIDE == 0:
+        # Quick verification mode uses one small non-zero offset per prompt so the
+        # prompt-specific configs are distinct instead of repeating the same baseline.
+        value = round(base_value + 0.05, 3)
         values.append(max(0.05, value))
+    else:
+        for step in range(-STEPS_EACH_SIDE, STEPS_EACH_SIDE + 1):
+            value = round(base_value + (step * DELTA_STEP), 3)
+            values.append(max(0.05, value))
     return values
 
 
 def _build_variants() -> list[dict[str, Any]]:
     variants: list[dict[str, Any]] = []
+    seen_weights = set()
     for prompt_name in PROMPTS:
         for value in _build_weight_values(prompt_name):
             weights = copy.deepcopy(BASE_WEIGHTS)
             weights[prompt_name] = value
+            
+            weights_key = tuple(sorted(weights.items()))
+            if weights_key in seen_weights:
+                continue
+            seen_weights.add(weights_key)
+            
             variants.append(
                 {
                     "prompt": prompt_name,
@@ -212,7 +225,7 @@ def main() -> int:
     if PREFER_CUDA and REQUIRE_CUDA and not cuda_available:
         raise RuntimeError("CUDA was required but torch.cuda.is_available() is False. Set REQUIRE_CUDA=False to allow CPU fallback.")
 
-    output_root = PROJECT_ROOT / "results" / "contrastive_calibration" / CALIBRATION_CACHE_KEY
+    output_root = Path(os.environ.get("CALIBRATION_OUTPUT_DIR", PROJECT_ROOT / "results" / "contrastive_calibration" / CALIBRATION_CACHE_KEY))
     output_root.mkdir(parents=True, exist_ok=True)
 
     variants = _build_variants()
@@ -229,7 +242,7 @@ def main() -> int:
         f"[INFO] CUDA preference: prefer_cuda={PREFER_CUDA}, require_cuda={REQUIRE_CUDA}, "
         f"torch.cuda.is_available()={cuda_available}, CUDA_VISIBLE_DEVICES={CUDA_VISIBLE_DEVICES}"
     , flush=True)
-    print(f"[INFO] One-at-a-time configs: {total_configs} ({len(PROMPTS)} prompts x {2 * STEPS_EACH_SIDE + 1} values)", flush=True)
+    print(f"[INFO] Unique configs to run: {total_configs} (originally {len(PROMPTS)} prompts x {2 * STEPS_EACH_SIDE + 1} values, duplicates removed)", flush=True)
     est_total_minutes = total_configs * len(TILES) * per_config_minutes
     print(f"[INFO] Estimated total runtime (based on {per_config_minutes} min/config/tile): {_format_duration(est_total_minutes*60)}", flush=True)
     print(f"[INFO] Total tile runs: {total_trials}", flush=True)

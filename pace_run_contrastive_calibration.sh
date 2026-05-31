@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH -J contrastive_calibration        # Job name
+#SBATCH -J contrastive_calibration         # Job name
 #SBATCH -A gts-pkastner3                     # Your PACE charge account
 #SBATCH -N 1                              # Request 1 node
 #SBATCH --ntasks-per-node=1               # One task
-#SBATCH --cpus-per-task=4                 # CPU cores for data loading
-#SBATCH --mem=32G                         # Memory
-#SBATCH --gres=gpu:V100:1                 # Request 1 V100 GPU
-#SBATCH -t 04:00:00                       # Walltime limit (hh:mm:ss)
+#SBATCH --cpus-per-task=8                 # <-- INCREASED: Doubled for faster tile data loading
+#SBATCH --mem=64G                         # <-- INCREASED: Give data loaders room to cache arrays
+#SBATCH --gres=gpu:V100:1                 # Request 1 V100 GPU (Or change to A100:1 if your account allows)
+#SBATCH -t 02:00:00                       # <-- DECREASED: Walltime (Shorter queues schedule faster)
 #SBATCH -q inferno                        # Queue
 #SBATCH -o logs/job_%j.out                # Slurm standard output log
 #SBATCH -e logs/job_%j.err                # Slurm standard error log
@@ -67,7 +67,6 @@ OUTPUT_BASE_DIR="$HOME/scratch/segmentation_outputs"
 
 # Ensure target directories exist before execution
 mkdir -p "$PROJECT_ROOT/logs"
-mkdir -p "${OUTPUT_BASE_DIR}/results"
 mkdir -p "${OUTPUT_BASE_DIR}/Results"
 
 # Use the python from the activated conda environment.
@@ -80,7 +79,7 @@ export PYTHONUNBUFFERED=1
 
 # Calibration Settings -> Exported so Python code inherits the Scratch path
 CALIBRATION_CACHE_KEY="split_3tiles_steps5_v2"
-export CALIBRATION_OUTPUT_DIR="${OUTPUT_BASE_DIR}/results/contrastive_calibration/${CALIBRATION_CACHE_KEY}"
+export CALIBRATION_OUTPUT_DIR="${OUTPUT_BASE_DIR}/Results/contrastive_calibration/${CALIBRATION_CACHE_KEY}"
 mkdir -p "$CALIBRATION_OUTPUT_DIR"
 
 # Pipeline runtime environment flags
@@ -160,7 +159,7 @@ if [ "$1" = "quick" ]; then
     echo "[INFO] Source Map: ${SOURCE_TIF}"
     echo "[INFO] Tile override: ${CONTRASTIVE_TILES}"
     echo "[INFO] Prompt override: ${CONTRASTIVE_PROMPTS}"
-    echo "[INFO] Contrastive step radius: ${STEPS_EACH_SIDE} (1 value per prompt)"
+    echo "[INFO] Quick contrastive mode: 3 distinct configs on 1 tile"
 
     "$PYTHON_EXE" -u "${PROJECT_ROOT}/runs/contrastive_calibration.py"
     EXIT_CODE=$?

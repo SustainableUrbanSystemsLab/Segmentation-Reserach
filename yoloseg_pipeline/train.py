@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,13 @@ if str(PROJECT_ROOT) not in sys.path:
 from yoloseg_pipeline.common import PROJECT_ROOT
 
 
+def _default_workers() -> int:
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm_cpus and slurm_cpus.isdigit():
+        return max(1, int(slurm_cpus))
+    return max(1, os.cpu_count() or 1)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a YOLOv11 segmentation model on the wind comfort dataset.")
     parser.add_argument("--data", default=str(PROJECT_ROOT / "data" / "yoloseg_windcomfort_rgb" / "dataset.yaml"))
@@ -23,7 +31,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--imgsz", type=int, default=1280)
     parser.add_argument("--device", default="0")
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=_default_workers())
     parser.add_argument("--project", default=str(PROJECT_ROOT / "results" / "yoloseg"))
     parser.add_argument("--name", default="wind_comfort_seg")
     parser.add_argument("--resume", action="store_true")
