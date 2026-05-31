@@ -67,6 +67,8 @@ if _prompts_override:
         raise ValueError("CONTRASTIVE_PROMPTS was set but did not contain any valid prompt names")
 else:
     PROMPTS = list(BASE_WEIGHTS.keys())
+
+_annotation_override = os.environ.get("CONTRASTIVE_ANNOTATION_PATH", "").strip()
 DELTA_STEP = 0.02
 # Default steps each side for interactive runs (5 => 11 values per prompt => 55 configs)
 STEPS_EACH_SIDE = _env_int("STEPS_EACH_SIDE", 5)
@@ -173,7 +175,7 @@ def _run_worker(trial_name: str, tif_file: str, output_dir: Path, weights: dict[
     spec = {
         "trial_name": trial_name,
         "tif_file": tif_file,
-        "xml_path": None,
+        "xml_path": _annotation_override or None,
         "output_dir": str(output_dir),
         "annotation_iou_class_mode": "split",
         "overrides": {

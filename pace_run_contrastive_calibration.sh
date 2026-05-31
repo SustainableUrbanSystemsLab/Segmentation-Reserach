@@ -130,6 +130,7 @@ echo "[INFO] Tile base directory: ${RESOLVED_TILE_BASE}"
 # Mode A: Quick Contrastive Verification Run
 if [ "$1" = "quick" ]; then
     TILE_INPUT="${2:-tile_002_003}"
+    ANNOTATION_INPUT="${3:-}"
 
     # Accept either a full tif path or a tile stem resolved against TILE_BASE_DIR.
     if [[ "$TILE_INPUT" == *.tif ]] || [[ "$TILE_INPUT" == */* ]]; then
@@ -150,6 +151,22 @@ if [ "$1" = "quick" ]; then
     fi
 
     TILE_STEM="$(basename "$SOURCE_TIF" .tif)"
+    if [ -n "$ANNOTATION_INPUT" ]; then
+        if [ ! -f "$ANNOTATION_INPUT" ]; then
+            echo "[ERROR] Could not locate annotation file for input: ${ANNOTATION_INPUT}"
+            exit 2
+        fi
+        export CONTRASTIVE_ANNOTATION_PATH="$ANNOTATION_INPUT"
+    else
+        SOURCE_BASE="${SOURCE_TIF%.*}"
+        if [ -f "${SOURCE_BASE}.json" ]; then
+            export CONTRASTIVE_ANNOTATION_PATH="${SOURCE_BASE}.json"
+        elif [ -f "${SOURCE_BASE}.xml" ]; then
+            export CONTRASTIVE_ANNOTATION_PATH="${SOURCE_BASE}.xml"
+        else
+            unset CONTRASTIVE_ANNOTATION_PATH || true
+        fi
+    fi
     export CONTRASTIVE_TILES="$SOURCE_TIF"
     export CONTRASTIVE_PROMPTS="nen_cat_a,nen_cat_c,nen_cat_e"
     export STEPS_EACH_SIDE=0
@@ -157,6 +174,7 @@ if [ "$1" = "quick" ]; then
 
     echo "[INFO] Running quick contrastive verification for ${TILE_STEM}"
     echo "[INFO] Source Map: ${SOURCE_TIF}"
+    echo "[INFO] Annotation override: ${CONTRASTIVE_ANNOTATION_PATH:-<auto-discover> }"
     echo "[INFO] Tile override: ${CONTRASTIVE_TILES}"
     echo "[INFO] Prompt override: ${CONTRASTIVE_PROMPTS}"
     echo "[INFO] Quick contrastive mode: 3 distinct configs on 1 tile"
