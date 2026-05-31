@@ -76,6 +76,7 @@ PYTHON_EXE="$(command -v python || true)"
 # GPU / CUDA settings
 export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:256"
+export PYTHONUNBUFFERED=1
 
 # Calibration Settings -> Exported so Python code inherits the Scratch path
 CALIBRATION_CACHE_KEY="split_3tiles_steps5_v2"
@@ -127,6 +128,47 @@ echo "[INFO] Tile base directory: ${RESOLVED_TILE_BASE}"
 # 3. RUN MODES (SINGLE TILE VS FULL RUN)
 # ==========================================
 
+# Mode A: Quick Contrastive Verification Run
+if [ "$1" = "quick" ]; then
+    TILE_INPUT="${2:-tile_002_003}"
+
+    # Accept either a full tif path or a tile stem resolved against TILE_BASE_DIR.
+    if [[ "$TILE_INPUT" == *.tif ]] || [[ "$TILE_INPUT" == */* ]]; then
+        SOURCE_TIF="$TILE_INPUT"
+    else
+        TILE_STEM="$TILE_INPUT"
+        SOURCE_TIF="${RESOLVED_TILE_BASE}/${TILE_STEM}.tif"
+    fi
+
+    if [ ! -f "$SOURCE_TIF" ]; then
+        echo "[ERROR] Could not locate source tif for input: ${TILE_INPUT}"
+        echo "[INFO] Expected path: ${SOURCE_TIF}"
+        echo "[INFO] Current tile base: ${RESOLVED_TILE_BASE}"
+        echo "[HINT] Pass a full tif path as the second argument, e.g.:"
+        echo "[HINT] sbatch pace_run_contrastive_calibration.sh quick /path/to/tile_002_003.tif"
+        echo "[HINT] Or set TILE_BASE_DIR to your tiles directory before running."
+        exit 2
+    fi
+
+    TILE_STEM="$(basename "$SOURCE_TIF" .tif)"
+    export CONTRASTIVE_TILES="$SOURCE_TIF"
+    export CONTRASTIVE_PROMPTS="nen_cat_a,nen_cat_c,nen_cat_e"
+    export STEPS_EACH_SIDE=0
+    export CALIBRATION_CACHE_KEY="quick_1tile_3configs_${TILE_STEM}"
+
+    echo "[INFO] Running quick contrastive verification for ${TILE_STEM}"
+    echo "[INFO] Source Map: ${SOURCE_TIF}"
+    echo "[INFO] Tile override: ${CONTRASTIVE_TILES}"
+    echo "[INFO] Prompt override: ${CONTRASTIVE_PROMPTS}"
+    echo "[INFO] Contrastive step radius: ${STEPS_EACH_SIDE} (1 value per prompt)"
+
+    "$PYTHON_EXE" -u "${PROJECT_ROOT}/runs/contrastive_calibration.py"
+    EXIT_CODE=$?
+
+    echo "[INFO] Quick contrastive run finished with exit code $EXIT_CODE"
+    exit $EXIT_CODE
+fi
+
 # Mode A: Single-Tile Prediction Mode
 if [ "$1" = "single" ]; then
     TILE_INPUT="${2:-tile_002_003}"
@@ -164,7 +206,7 @@ if [ "$1" = "single" ]; then
 
     # Run the runs/get_satellite.py inside a small Python wrapper so we can set
     # models.config.results_dir to our scratch OUT_DIR before executing the module.
-    "$PYTHON_EXE" - <<PYTHON
+    "$PYTHON_EXE" -u - <<PYTHON
 import sys
 from pathlib import Path
 sys.path.insert(0, "$PROJECT_ROOT")
@@ -181,7 +223,7 @@ fi
 
 # Mode B: Default Full Contrastive Calibration Run
 echo "[INFO] Running full contrastive calibration..."
-"$PYTHON_EXE" "${PROJECT_ROOT}/runs/contrastive_calibration.py"
+"$PYTHON_EXE" -u "${PROJECT_ROOT}/runs/contrastive_calibration.py"
 EXIT_CODE=$?
 
 echo "[INFO] Full pipeline finished with exit code $EXIT_CODE"

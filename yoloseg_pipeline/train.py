@@ -21,7 +21,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="yolo11n-seg.pt", help="Starting checkpoint or model name.")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch", type=int, default=8)
-    parser.add_argument("--imgsz", type=int, default=1024)
+    parser.add_argument("--imgsz", type=int, default=1280)
     parser.add_argument("--device", default="0")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--project", default=str(PROJECT_ROOT / "results" / "yoloseg"))

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 from ultralytics import YOLO
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,16 +18,37 @@ from models.iou_comparator import compare_annotation_iou
 from yoloseg_pipeline.common import CLASS_NAMES, PROJECT_ROOT, load_rgb_from_tif
 
 
+PRED_TO_IOU_CLASS_NAMES = {
+    "NEN_A": "nen_cat_a",
+    "NEN_B": "nen_cat_b",
+    "NEN_C": "nen_cat_c",
+    "NEN_D": "nen_cat_d",
+    "Uncomfortable": "nen_cat_e",
+}
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run YOLOv11 segmentation inference on a tif or folder of tifs.")
     parser.add_argument("--weights", required=True, help="Path to a trained YOLO segmentation checkpoint.")
     parser.add_argument("--source", required=True, help="A tif file or a folder containing tif files.")
     parser.add_argument("--output-dir", default=str(PROJECT_ROOT / "results" / "yoloseg_predictions"))
-    parser.add_argument("--imgsz", type=int, default=1024)
+    parser.add_argument("--imgsz", type=int, default=1280)
     parser.add_argument("--conf", type=float, default=0.25)
+    parser.add_argument(
+        "--fallback-conf",
+        type=float,
+        default=0.001,
+        help="Lower confidence used once if the initial pass returns no masks.",
+    )
     parser.add_argument("--tile-size", type=int, default=1024)
     parser.add_argument("--tile-overlap", type=int, default=128)
     parser.add_argument("--annotation-path", default=None, help="Optional annotation JSON/XML for IoU evaluation.")
+    parser.add_argument(
+        "--force-best-guess",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fill any remaining background pixels with the nearest predicted class.",
+    )
     return parser.parse_args()
 
 
@@ -51,7 +73,19 @@ def _tile_ranges(length: int, tile_size: int, overlap: int) -> list[tuple[int, i
     return ranges
 
 
-def _predict_tiled(model: YOLO, rgb: np.ndarray, tile_size: int, overlap: int, conf: float, imgsz: int) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
+def _effective_tile_size(tile_size: int, imgsz: int) -> int:
+    return max(1, min(int(tile_size), int(imgsz)))
+
+
+def _predict_tiled(
+    model: YOLO,
+    rgb: np.ndarray,
+    tile_size: int,
+    overlap: int,
+    conf: float,
+    imgsz: int,
+    fallback_conf: float,
+) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
     height, width = rgb.shape[:2]
     class_masks = {name: np.zeros((height, width), dtype=bool) for name in CLASS_NAMES}
     best_conf = np.zeros((height, width), dtype=np.float32)
@@ -67,6 +101,9 @@ def _predict_tiled(model: YOLO, rgb: np.ndarray, tile_size: int, overlap: int, c
                 continue
 
             result = model.predict(chip, imgsz=imgsz, conf=conf, verbose=False)[0]
+            if (result.masks is None or result.boxes is None or len(result.boxes) == 0) and fallback_conf >= 0.0:
+                result = model.predict(chip, imgsz=imgsz, conf=min(conf, fallback_conf), verbose=False)[0]
+
             if result.masks is None or result.boxes is None or len(result.boxes) == 0:
                 continue
 
@@ -89,6 +126,28 @@ def _predict_tiled(model: YOLO, rgb: np.ndarray, tile_size: int, overlap: int, c
                 class_view[update] = True
 
     return class_masks, class_map, best_conf
+
+
+def _fill_best_guess(class_masks: dict[str, np.ndarray], class_map: np.ndarray, best_conf: np.ndarray) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    background = class_map == 0
+    if not np.any(background) or not np.any(~background):
+        return class_masks, class_map, best_conf
+
+    _, indices = distance_transform_edt(background, return_indices=True)
+    nearest_class_map = class_map[tuple(indices)]
+    nearest_best_conf = best_conf[tuple(indices)]
+
+    filled_class_map = class_map.copy()
+    filled_class_map[background] = nearest_class_map[background]
+
+    filled_best_conf = best_conf.copy()
+    filled_best_conf[background] = nearest_best_conf[background]
+
+    filled_class_masks = {
+        name: filled_class_map == (index + 1)
+        for index, name in enumerate(CLASS_NAMES)
+    }
+    return filled_class_masks, filled_class_map, filled_best_conf
 
 
 def _annotation_path_for_source(source: Path, explicit_path: str | None) -> Path | None:
@@ -124,9 +183,31 @@ def _save_preview(output_path: Path, rgb: np.ndarray, class_map: np.ndarray) -> 
     Image.fromarray(blended, mode="RGB").save(output_path)
 
 
+def _to_iou_class_masks(class_masks: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    return {iou_name: class_masks[pred_name] for pred_name, iou_name in PRED_TO_IOU_CLASS_NAMES.items()}
+
+
 def _process_source(model: YOLO, source: Path, args: argparse.Namespace, output_dir: Path) -> dict[str, object]:
     rgb = load_rgb_from_tif(source)
-    class_masks, class_map, best_conf = _predict_tiled(model, rgb, args.tile_size, args.tile_overlap, args.conf, args.imgsz)
+    effective_tile_size = _effective_tile_size(args.tile_size, args.imgsz)
+    if effective_tile_size != args.tile_size:
+        print(
+            f"[WARN] tile-size={args.tile_size} is larger than imgsz={args.imgsz}; "
+            f"using effective tile-size={effective_tile_size} to avoid extra downsampling"
+        )
+
+    class_masks, class_map, best_conf = _predict_tiled(
+        model,
+        rgb,
+        effective_tile_size,
+        args.tile_overlap,
+        args.conf,
+        args.imgsz,
+        args.fallback_conf,
+    )
+
+    if args.force_best_guess:
+        class_masks, class_map, best_conf = _fill_best_guess(class_masks, class_map, best_conf)
 
     source_out = output_dir / source.stem
     source_out.mkdir(parents=True, exist_ok=True)
@@ -138,16 +219,20 @@ def _process_source(model: YOLO, source: Path, args: argparse.Namespace, output_
 
     report: dict[str, object] = {
         "source": str(source),
+        "imgsz": int(args.imgsz),
+        "tile_size": int(args.tile_size),
+        "effective_tile_size": int(effective_tile_size),
         "class_map_path": str(class_map_path),
         "preview_path": str(source_out / f"{source.stem}_preview.png"),
         "class_pixel_counts": {name: int(mask.sum()) for name, mask in class_masks.items()},
+        "force_best_guess": bool(args.force_best_guess),
     }
 
     annotation_path = _annotation_path_for_source(source, args.annotation_path)
     if annotation_path is not None:
         comparison = compare_annotation_iou(
             image_name=source.name,
-            predicted_masks=class_masks,
+            predicted_masks=_to_iou_class_masks(class_masks),
             xml_path=annotation_path,
             output_dir=source_out / "annotation_iou",
             class_mode="split",

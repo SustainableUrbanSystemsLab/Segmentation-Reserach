@@ -15,6 +15,11 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CALIBRATE = PROJECT_ROOT / "runs" / "calibrate_configs.py"
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.environ.get(name)
@@ -37,11 +42,15 @@ def _env_float(name: str, default: float) -> float:
     return float(value)
 
 # Run on the labeled tiles only. Tile 004 is intentionally omitted.
-TILES = [
-    "Maps/Tiles/Atlanta_split_google/tile_002_002.tif",
-    "Maps/Tiles/Atlanta_split_google/tile_002_003.tif",
-    "Maps/Tiles/Atlanta_split_google/tile_002_004.tif",
-]
+_tiles_override = os.environ.get("CONTRASTIVE_TILES", "").strip()
+if _tiles_override:
+    TILES = [tile.strip() for tile in _tiles_override.split(",") if tile.strip()]
+else:
+    TILES = [
+        "Maps/Tiles/Atlanta_split_google/tile_002_002.tif",
+        "Maps/Tiles/Atlanta_split_google/tile_002_003.tif",
+        "Maps/Tiles/Atlanta_split_google/tile_002_004.tif",
+    ]
 
 BASE_WEIGHTS = {
     "nen_cat_a": 0.68,
@@ -51,7 +60,13 @@ BASE_WEIGHTS = {
     "nen_cat_e": 0.95,
 }
 
-PROMPTS = list(BASE_WEIGHTS.keys())
+_prompts_override = os.environ.get("CONTRASTIVE_PROMPTS", "").strip()
+if _prompts_override:
+    PROMPTS = [prompt.strip() for prompt in _prompts_override.split(",") if prompt.strip() in BASE_WEIGHTS]
+    if not PROMPTS:
+        raise ValueError("CONTRASTIVE_PROMPTS was set but did not contain any valid prompt names")
+else:
+    PROMPTS = list(BASE_WEIGHTS.keys())
 DELTA_STEP = 0.02
 # Default steps each side for interactive runs (5 => 11 values per prompt => 55 configs)
 STEPS_EACH_SIDE = _env_int("STEPS_EACH_SIDE", 5)
@@ -183,7 +198,7 @@ def _run_worker(trial_name: str, tif_file: str, output_dir: Path, weights: dict[
 def main() -> int:
     # Hard-coded settings for interactive/local runs
     global STEPS_EACH_SIDE
-    STEPS_EACH_SIDE = 5
+    STEPS_EACH_SIDE = _env_int("STEPS_EACH_SIDE", 5)
     per_config_minutes = ESTIMATED_MINUTES_PER_TILE
 
     cuda_available = False
@@ -204,21 +219,21 @@ def main() -> int:
     total_configs = len(variants)
     total_trials = total_configs * len(TILES)
     start_time = datetime.now()
-    print(f"[INFO] Base weights: {BASE_WEIGHTS}")
-    print(f"[INFO] Tiles: {TILES}")
+    print(f"[INFO] Base weights: {BASE_WEIGHTS}", flush=True)
+    print(f"[INFO] Tiles: {TILES}", flush=True)
     print(
         f"[INFO] Cache key: {CALIBRATION_CACHE_KEY} | "
         f"resume={CALIBRATION_RESUME_FROM_CACHE} | force_rerun={CALIBRATION_FORCE_RERUN}"
-    )
+    , flush=True)
     print(
         f"[INFO] CUDA preference: prefer_cuda={PREFER_CUDA}, require_cuda={REQUIRE_CUDA}, "
         f"torch.cuda.is_available()={cuda_available}, CUDA_VISIBLE_DEVICES={CUDA_VISIBLE_DEVICES}"
-    )
-    print(f"[INFO] One-at-a-time configs: {total_configs} ({len(PROMPTS)} prompts x {2 * STEPS_EACH_SIDE + 1} values)")
+    , flush=True)
+    print(f"[INFO] One-at-a-time configs: {total_configs} ({len(PROMPTS)} prompts x {2 * STEPS_EACH_SIDE + 1} values)", flush=True)
     est_total_minutes = total_configs * len(TILES) * per_config_minutes
-    print(f"[INFO] Estimated total runtime (based on {per_config_minutes} min/config/tile): {_format_duration(est_total_minutes*60)}")
-    print(f"[INFO] Total tile runs: {total_trials}")
-    print(f"[INFO] Output root: {output_root}")
+    print(f"[INFO] Estimated total runtime (based on {per_config_minutes} min/config/tile): {_format_duration(est_total_minutes*60)}", flush=True)
+    print(f"[INFO] Total tile runs: {total_trials}", flush=True)
+    print(f"[INFO] Output root: {output_root}", flush=True)
 
     cached_tile_runs = 0
     if CALIBRATION_RESUME_FROM_CACHE and not CALIBRATION_FORCE_RERUN:
@@ -235,7 +250,7 @@ def main() -> int:
     print(
         f"[INFO] Cached tile runs found: {cached_tile_runs}/{total_trials} | "
         f"estimated remaining runtime: {_format_duration(pending_est_minutes * 60)}"
-    )
+    , flush=True)
 
     results: list[dict[str, Any]] = []
     started = datetime.now()
@@ -250,7 +265,7 @@ def main() -> int:
         per_tile_reports: list[dict[str, Any]] = []
         trial_started = perf_counter()
 
-        print(f"[INFO] [{index}/{total_configs}] Running config {trial_name_base} ({prompt_name}={weight:.3f})")
+        print(f"[INFO] [{index}/{total_configs}] Running config {trial_name_base} ({prompt_name}={weight:.3f})", flush=True)
         for tile_index, tif_file in enumerate(TILES, start=1):
             tile_stem = _tile_stem(tif_file)
             tile_folder = trial_folder / tile_stem
@@ -278,10 +293,10 @@ def main() -> int:
                         f"[INFO]   Tile {tile_index}/{len(TILES)} cache hit: {tile_stem} "
                         f"mIoU={per_tile_reports[-1]['mean_iou']:.4f} | "
                         f"overall remaining ~ {_format_duration(tile_eta_seconds)}"
-                    )
+                    , flush=True)
                     continue
 
-            print(f"[INFO]   Starting tile {tile_index}/{len(TILES)}: {tile_stem} (config {index}/{total_configs}) at {datetime.now().isoformat()}")
+            print(f"[INFO]   Starting tile {tile_index}/{len(TILES)}: {tile_stem} (config {index}/{total_configs}) at {datetime.now().isoformat()}", flush=True)
             run_result = _run_worker(tile_stem, tif_file, trial_folder, variant["weights"])
             if run_result["returncode"] != 0 or not report_path.exists():
                 print(f"[WARN] [{index}/{total_configs}] Tile failed or report missing for {tile_stem} in {trial_name_base}")
@@ -298,7 +313,7 @@ def main() -> int:
                 elapsed_tile = (datetime.now() - started).total_seconds()
                 remaining_tile_runs = max(0, total_trials - processed_tile_runs)
                 tile_eta_seconds = (elapsed_tile / processed_tile_runs) * remaining_tile_runs if processed_tile_runs else 0.0
-                print(f"[INFO]   Overall remaining after failed tile ~ {_format_duration(tile_eta_seconds)}")
+                print(f"[INFO]   Overall remaining after failed tile ~ {_format_duration(tile_eta_seconds)}", flush=True)
                 continue
 
             with report_path.open("r", encoding="utf-8") as f:
@@ -320,7 +335,7 @@ def main() -> int:
             print(
                 f"[INFO]   Tile {tile_index}/{len(TILES)} done: mIoU={per_tile_reports[-1]['mean_iou']:.4f} | "
                 f"overall remaining ~ {_format_duration(tile_eta_seconds)}"
-            )
+            , flush=True)
 
         valid_reports = [item for item in per_tile_reports if not item.get("failed")]
         summary = {
@@ -349,7 +364,7 @@ def main() -> int:
         print(
             f"[INFO] [{index}/{total_configs}] Finished {trial_name_base}: "
             f"mIoU={summary['mean_iou_avg']:.4f} | ETA ~ {_format_duration(eta_seconds)}"
-        )
+        , flush=True)
 
     payload = {
         "generated_at": start_time.isoformat(),
@@ -369,8 +384,8 @@ def main() -> int:
         print(
             f"[INFO] Best config so far: {best_result['trial_name']} "
             f"(mIoU={best_result['mean_iou_avg']:.4f}, pixel_accuracy={best_result['mean_pixel_accuracy_avg']:.4f})"
-        )
-    print(f"[INFO] Saved calibration summary to: {summary_path}")
+        , flush=True)
+    print(f"[INFO] Saved calibration summary to: {summary_path}", flush=True)
     return 0
 
 

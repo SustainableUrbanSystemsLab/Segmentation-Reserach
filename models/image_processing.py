@@ -14,10 +14,10 @@ except Exception:
 
 def log_stage(message: str, start_time: float | None = None) -> None:
     if start_time is None:
-        print(f"[INFO] {message}")
+        print(f"[INFO] {message}", flush=True)
         return
     elapsed = perf_counter() - start_time
-    print(f"[INFO] {message} ({elapsed:.2f}s)")
+    print(f"[INFO] {message} ({elapsed:.2f}s)", flush=True)
 
 
 def save_figure_high_resolution(
