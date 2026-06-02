@@ -18,6 +18,15 @@ from models.iou_comparator import compare_annotation_iou
 from yoloseg_pipeline.common import CLASS_NAMES, PROJECT_ROOT, load_rgb_from_tif
 
 
+PREDICTION_CLASS_COLORS = {
+    "NEN_A": np.array([0.00, 0.45, 0.20], dtype=np.float32),
+    "NEN_B": np.array([0.45, 0.80, 0.25], dtype=np.float32),
+    "NEN_C": np.array([1.00, 0.90, 0.20], dtype=np.float32),
+    "NEN_D": np.array([1.00, 0.55, 0.10], dtype=np.float32),
+    "Uncomfortable": np.array([0.90, 0.12, 0.12], dtype=np.float32),
+}
+
+
 PRED_TO_IOU_CLASS_NAMES = {
     "NEN_A": "nen_cat_a",
     "NEN_B": "nen_cat_b",
@@ -25,6 +34,8 @@ PRED_TO_IOU_CLASS_NAMES = {
     "NEN_D": "nen_cat_d",
     "Uncomfortable": "nen_cat_e",
 }
+
+PREVIEW_MAX_DIM = 1200
 
 
 def _parse_args() -> argparse.Namespace:
@@ -163,7 +174,9 @@ def _annotation_path_for_source(source: Path, explicit_path: str | None) -> Path
     return None
 
 
-def _save_preview(output_path: Path, rgb: np.ndarray, class_map: np.ndarray) -> None:
+def _save_preview(output_path: Path, rgb: np.ndarray, class_map: np.ndarray, footer_lines: list[str] | None = None) -> None:
+    from PIL import Image, ImageDraw, ImageFont
+
     color_lookup = np.array(
         [
             [0, 0, 0],
@@ -177,10 +190,63 @@ def _save_preview(output_path: Path, rgb: np.ndarray, class_map: np.ndarray) -> 
     )
     overlay = color_lookup[class_map]
     blended = (0.65 * rgb.astype(np.float32) + 0.35 * overlay.astype(np.float32)).clip(0, 255).astype(np.uint8)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    from PIL import Image
 
-    Image.fromarray(blended, mode="RGB").save(output_path)
+    base_img = Image.fromarray(blended, mode="RGB").convert("RGBA")
+    font = ImageFont.load_default()
+    pad = 14
+    panel_width = 280
+    panel_x = base_img.width + pad * 2
+    canvas_width = base_img.width + panel_width + pad * 3
+    canvas_height = max(base_img.height + pad * 2, 260)
+    canvas = Image.new("RGBA", (canvas_width, canvas_height), (16, 16, 18, 255))
+    canvas.paste(base_img, (pad, pad))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle(
+        (panel_x - 10, pad - 6, canvas_width - pad, canvas_height - pad),
+        radius=12,
+        fill=(0, 0, 0, 160),
+        outline=(255, 255, 255, 180),
+        width=1,
+    )
+
+    title = f"YOLO Prediction | {Path(output_path).stem}"
+    draw.text((panel_x, pad), title, font=font, fill=(255, 255, 255, 255))
+    title_bbox = draw.textbbox((0, 0), title, font=font)
+    cursor_y = pad + (title_bbox[3] - title_bbox[1]) + 12
+
+    legend_rows = [
+        ("NEN A", PREDICTION_CLASS_COLORS["NEN_A"]),
+        ("NEN B", PREDICTION_CLASS_COLORS["NEN_B"]),
+        ("NEN C", PREDICTION_CLASS_COLORS["NEN_C"]),
+        ("NEN D", PREDICTION_CLASS_COLORS["NEN_D"]),
+        ("Uncomfortable", PREDICTION_CLASS_COLORS["Uncomfortable"]),
+    ]
+
+    box_size = 14
+    row_gap = 8
+    text_gap = 8
+    for label, color in legend_rows:
+        color_rgb = tuple(int(round(float(c) * 255)) for c in color)
+        draw.rectangle((panel_x, cursor_y + 1, panel_x + box_size, cursor_y + 1 + box_size), fill=color_rgb, outline=(255, 255, 255, 220))
+        draw.text((panel_x + box_size + text_gap, cursor_y), label, font=font, fill=(255, 255, 255, 255))
+        cursor_y += box_size + row_gap
+
+    if footer_lines:
+        cursor_y += 16
+        draw.line((panel_x, cursor_y, canvas_width - pad - 8, cursor_y), fill=(255, 255, 255, 120), width=1)
+        cursor_y += 12
+        for line in footer_lines:
+            draw.text((panel_x, cursor_y), line, font=font, fill=(255, 255, 255, 255))
+            line_bbox = draw.textbbox((0, 0), line, font=font)
+            cursor_y += (line_bbox[3] - line_bbox[1]) + 6
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.convert("RGB").save(output_path, format="PNG", compress_level=6)
+
+
+def _preview_stride(shape: tuple[int, int, int], max_dim: int = PREVIEW_MAX_DIM) -> int:
+    return max(1, int(np.ceil(max(shape[:2]) / max_dim)))
 
 
 def _to_iou_class_masks(class_masks: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -215,7 +281,6 @@ def _process_source(model: YOLO, source: Path, args: argparse.Namespace, output_
     class_map_path = source_out / f"{source.stem}_class_map.npy"
     np.save(class_map_path, class_map)
     np.save(source_out / f"{source.stem}_best_conf.npy", best_conf)
-    _save_preview(source_out / f"{source.stem}_preview.png", rgb, class_map)
 
     report: dict[str, object] = {
         "source": str(source),
@@ -244,6 +309,21 @@ def _process_source(model: YOLO, source: Path, args: argparse.Namespace, output_
                 if key not in {"ground_truth_class_map", "prediction_class_map", "valid_mask", "label_lookup"}
             }
         )
+
+    footer_lines = None
+    if report.get("mean_iou") is not None and report.get("pixel_accuracy") is not None:
+        footer_lines = [
+            f"mIoU: {float(report['mean_iou']):.3f}",
+            f"Pixel accuracy: {float(report['pixel_accuracy']):.3f}",
+        ]
+
+    preview_stride = _preview_stride(rgb.shape)
+    if preview_stride > 1:
+        print(f"[INFO] Downsampling preview by stride={preview_stride} to match combined-mask display sizing")
+    preview_rgb = rgb[::preview_stride, ::preview_stride]
+    preview_class_map = class_map[::preview_stride, ::preview_stride]
+
+    _save_preview(source_out / f"{source.stem}_preview.png", preview_rgb, preview_class_map, footer_lines=footer_lines)
 
     report_path = source_out / f"{source.stem}_prediction_report.json"
     report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")

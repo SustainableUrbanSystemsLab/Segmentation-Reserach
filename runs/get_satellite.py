@@ -289,9 +289,61 @@ def log_pipeline_error(context: str, exc: Exception) -> None:
 
 import pickle
 
+def build_pipeline_cache_scope_signature(prompt_configs: list[dict]) -> str:
+    """Build a stable cache scope for the active prompt and runtime configuration."""
+    import hashlib
+    import json
+
+    contrastive_weights = getattr(cfg, "contrastive_prompt_weights", {}) or {}
+    scope_payload = {
+        "prompt_signature": build_region_context_prompt_signature(prompt_configs),
+        "contrastive_prompt_weights": {
+            name: float(weight)
+            for name, weight in sorted(contrastive_weights.items())
+        },
+        "pixel_assignment_mode": str(getattr(cfg, "pixel_assignment_mode", "legacy")),
+        "full_image_mask_mode": bool(getattr(cfg, "full_image_mask_mode", False)),
+        "coarse_to_fine_cell_px": int(getattr(cfg, "coarse_to_fine_cell_px", 0)),
+        "sam_min_mask_area_px": int(getattr(cfg, "sam_min_mask_area_px", 0)),
+        "sam_auto_max_total_masks": int(getattr(cfg, "sam_auto_max_total_masks", 0)),
+        "dino_enable_tiled_fallback": bool(getattr(cfg, "dino_enable_tiled_fallback", True)),
+        "dino_enable_area_split": bool(getattr(cfg, "dino_enable_area_split", False)),
+        "dino_refine_bounds": bool(getattr(cfg, "dino_refine_bounds", False)),
+        "dino_full_resolution": bool(getattr(cfg, "dino_full_resolution", False)),
+        "dino_resize_short_side": int(getattr(cfg, "dino_resize_short_side", 0)),
+        "dino_resize_max_size": int(getattr(cfg, "dino_resize_max_size", 0)),
+        "dino_nms_iou_threshold": float(getattr(cfg, "dino_nms_iou_threshold", 0.0)),
+        "dino_max_boxes_per_prompt_for_sam": int(getattr(cfg, "dino_max_boxes_per_prompt_for_sam", 0)),
+        "dino_tile_size_px": int(getattr(cfg, "dino_tile_size_px", 0)),
+        "dino_tile_overlap_px": int(getattr(cfg, "dino_tile_overlap_px", 0)),
+        "large_image_tile_size_px": int(getattr(cfg, "large_image_tile_size_px", 0)),
+        "large_image_tile_overlap_px": int(getattr(cfg, "large_image_tile_overlap_px", 0)),
+        "sam_full_resolution": bool(getattr(cfg, "sam_full_resolution", False)),
+        "sam_points_per_side": int(getattr(cfg, "sam_points_per_side", 0)),
+        "sam_pred_iou_thresh": float(getattr(cfg, "sam_pred_iou_thresh", 0.0)),
+        "sam_stability_score_thresh": float(getattr(cfg, "sam_stability_score_thresh", 0.0)),
+        "sam_auto_tile_size_px": int(getattr(cfg, "sam_auto_tile_size_px", 0)),
+        "sam_auto_tile_overlap_px": int(getattr(cfg, "sam_auto_tile_overlap_px", 0)),
+        "tier_e_threshold": float(getattr(cfg, "tier_e_threshold", 0.0)),
+        "tier_d_threshold": float(getattr(cfg, "tier_d_threshold", 0.0)),
+        "tier_c_threshold": float(getattr(cfg, "tier_c_threshold", 0.0)),
+        "tier_b_threshold": float(getattr(cfg, "tier_b_threshold", 0.0)),
+    }
+    scope_text = json.dumps(scope_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(scope_text.encode("utf-8")).hexdigest()[:16]
+
+
 def get_cache_dir() -> Path:
     """Return cache directory, creating it if needed."""
-    cache_dir = cfg.results_dir / ".segmentation_cache"
+    cache_root_env = os.environ.get("PIPELINE_CACHE_ROOT", "").strip()
+    if cache_root_env:
+        cache_root = Path(cache_root_env).expanduser()
+    else:
+        cache_root = Path(getattr(cfg, "pipeline_cache_root", cfg.results_dir / ".segmentation_cache"))
+
+    prompt_configs = list(getattr(cfg, "dino_prompt_configs", []) or [])
+    cache_scope = build_pipeline_cache_scope_signature(prompt_configs)
+    cache_dir = cache_root / cache_scope
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
@@ -2428,6 +2480,7 @@ def compose_visualization_with_side_panel(
     gradient_cmap=None,
     gradient_low_label: str = "Low score",
     gradient_high_label: str = "High score",
+    footer_lines: list[str] | None = None,
     panel_width: int = 280,
 ) -> PILImage.Image:
     """Add a title and either categorical or gradient legend in a right-side panel."""
@@ -2477,6 +2530,15 @@ def compose_visualization_with_side_panel(
         draw.text((panel_x, cursor_y), gradient_low_label, font=font, fill=(255, 255, 255, 255))
         high_bbox = draw.textbbox((0, 0), gradient_high_label, font=font)
         draw.text((panel_x + bar_w - (high_bbox[2] - high_bbox[0]), cursor_y), gradient_high_label, font=font, fill=(255, 255, 255, 255))
+
+    if footer_lines:
+        cursor_y += 16
+        draw.line((panel_x, cursor_y, canvas_width - pad - 8, cursor_y), fill=(255, 255, 255, 120), width=1)
+        cursor_y += 12
+        for line in footer_lines:
+            draw.text((panel_x, cursor_y), line, font=font, fill=(255, 255, 255, 255))
+            line_bbox = draw.textbbox((0, 0), line, font=font)
+            cursor_y += (line_bbox[3] - line_bbox[1]) + 6
 
     return canvas
 
@@ -2596,6 +2658,10 @@ result_pil = compose_visualization_with_side_panel(
         ("D", get_prompt_color("nen_cat_d")),
         ("E", get_prompt_color("nen_cat_e")),
     ],
+    footer_lines=[
+        f"mIoU: {iou_report['mean_iou']:.3f}" if 'iou_report' in locals() and iou_report else None,
+        f"Pixel accuracy: {iou_report['pixel_accuracy']:.3f}" if 'iou_report' in locals() and iou_report else None,
+    ] if 'iou_report' in locals() and iou_report else None,
 )
 
 save_current_figure(f"{run_id}_combined_masks.png", "combined_masks", pil_img=result_pil)

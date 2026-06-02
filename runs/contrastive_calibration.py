@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
@@ -40,6 +41,13 @@ def _env_float(name: str, default: float) -> float:
     if value is None or not value.strip():
         return default
     return float(value)
+
+
+def _default_parallel_jobs() -> int:
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm_cpus and slurm_cpus.isdigit():
+        return max(1, int(slurm_cpus))
+    return max(1, os.cpu_count() or 1)
 
 # Run on the labeled tiles only. Tile 004 is intentionally omitted.
 _tiles_override = os.environ.get("CONTRASTIVE_TILES", "").strip()
@@ -198,7 +206,6 @@ def _run_worker(trial_name: str, tif_file: str, output_dir: Path, weights: dict[
             "annotation_iou_visualization_max_dim": 900,
         },
     }
-
     cmd = [sys.executable, str(CALIBRATE), "--worker", "--spec", json.dumps(spec, default=_json_default)]
     started = perf_counter()
     completed = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=_build_worker_env())
@@ -229,6 +236,7 @@ def main() -> int:
 
     output_root = Path(os.environ.get("CALIBRATION_OUTPUT_DIR", PROJECT_ROOT / "results" / "contrastive_calibration" / CALIBRATION_CACHE_KEY))
     output_root.mkdir(parents=True, exist_ok=True)
+    parallel_jobs = max(1, _env_int("CALIBRATION_PARALLEL_JOBS", _default_parallel_jobs()))
 
     variants = _build_variants()
     total_configs = len(variants)
@@ -245,9 +253,14 @@ def main() -> int:
         f"torch.cuda.is_available()={cuda_available}, CUDA_VISIBLE_DEVICES={CUDA_VISIBLE_DEVICES}"
     , flush=True)
     print(f"[INFO] Unique configs to run: {total_configs} (originally {len(PROMPTS)} prompts x {2 * STEPS_EACH_SIDE + 1} values, duplicates removed)", flush=True)
-    est_total_minutes = total_configs * len(TILES) * per_config_minutes
-    print(f"[INFO] Estimated total runtime (based on {per_config_minutes} min/config/tile): {_format_duration(est_total_minutes*60)}", flush=True)
     print(f"[INFO] Total tile runs: {total_trials}", flush=True)
+    print(f"[INFO] Parallel calibration jobs: {parallel_jobs}", flush=True)
+    est_total_minutes = (total_configs * len(TILES) * per_config_minutes) / parallel_jobs
+    print(
+        f"[INFO] Estimated wall time with {parallel_jobs} worker(s) (based on {per_config_minutes} min/config/tile): "
+        f"{_format_duration(est_total_minutes * 60)}",
+        flush=True,
+    )
     print(f"[INFO] Output root: {output_root}", flush=True)
 
     cached_tile_runs = 0
@@ -261,15 +274,18 @@ def main() -> int:
                     cached_tile_runs += 1
 
     pending_tile_runs = max(0, total_trials - cached_tile_runs)
-    pending_est_minutes = pending_tile_runs * per_config_minutes
+    pending_est_minutes = (pending_tile_runs * per_config_minutes) / parallel_jobs
     print(
         f"[INFO] Cached tile runs found: {cached_tile_runs}/{total_trials} | "
         f"estimated remaining runtime: {_format_duration(pending_est_minutes * 60)}"
     , flush=True)
 
     results: list[dict[str, Any]] = []
+    trial_states: list[dict[str, Any]] = []
+    pending_jobs: list[dict[str, Any]] = []
     started = datetime.now()
-    processed_tile_runs = 0
+    run_start_perf = perf_counter()
+    processed_tile_runs = cached_tile_runs
 
     for index, variant in enumerate(variants, start=1):
         prompt_name = variant["prompt"]
@@ -277,8 +293,19 @@ def main() -> int:
         trial_name_base = f"trial_{index:03d}"
         trial_folder = output_root / trial_name_base
         trial_folder.mkdir(parents=True, exist_ok=True)
-        per_tile_reports: list[dict[str, Any]] = []
+        per_tile_reports: list[dict[str, Any] | None] = [None] * len(TILES)
         trial_started = perf_counter()
+
+        trial_state = {
+            "trial_name": trial_name_base,
+            "prompt_name": prompt_name,
+            "weight": weight,
+            "weights": variant["weights"],
+            "trial_folder": trial_folder,
+            "per_tile_reports": per_tile_reports,
+            "trial_started": trial_started,
+        }
+        trial_states.append(trial_state)
 
         print(f"[INFO] [{index}/{total_configs}] Running config {trial_name_base} ({prompt_name}={weight:.3f})", flush=True)
         for tile_index, tif_file in enumerate(TILES, start=1):
@@ -286,98 +313,137 @@ def main() -> int:
             tile_folder = trial_folder / tile_stem
             tile_folder.mkdir(parents=True, exist_ok=True)
             report_path = tile_folder / "annotation_iou" / f"{tile_stem}_iou_report.json"
+            tile_report_index = tile_index - 1
 
             if CALIBRATION_RESUME_FROM_CACHE and not CALIBRATION_FORCE_RERUN:
                 cached_report = _load_report_if_exists(report_path)
                 if cached_report is not None:
-                    per_tile_reports.append(
-                        {
-                            "tile": tile_stem,
-                            "mean_iou": float(cached_report.get("mean_iou", 0.0)),
-                            "pixel_accuracy": float(cached_report.get("pixel_accuracy", 0.0)),
-                            "report_path": str(report_path),
-                            "cached": True,
-                            "elapsed_seconds": 0.0,
-                        }
-                    )
+                    per_tile_reports[tile_report_index] = {
+                        "tile": tile_stem,
+                        "mean_iou": float(cached_report.get("mean_iou", 0.0)),
+                        "pixel_accuracy": float(cached_report.get("pixel_accuracy", 0.0)),
+                        "report_path": str(report_path),
+                        "cached": True,
+                        "elapsed_seconds": 0.0,
+                    }
                     processed_tile_runs += 1
-                    elapsed_tile = (datetime.now() - started).total_seconds()
+                    elapsed_tile = perf_counter() - run_start_perf
                     remaining_tile_runs = max(0, total_trials - processed_tile_runs)
                     tile_eta_seconds = (elapsed_tile / processed_tile_runs) * remaining_tile_runs if processed_tile_runs else 0.0
                     print(
                         f"[INFO]   Tile {tile_index}/{len(TILES)} cache hit: {tile_stem} "
-                        f"mIoU={per_tile_reports[-1]['mean_iou']:.4f} | "
+                        f"mIoU={per_tile_reports[tile_report_index]['mean_iou']:.4f} | "
                         f"overall remaining ~ {_format_duration(tile_eta_seconds)}"
                     , flush=True)
                     continue
 
-            print(f"[INFO]   Starting tile {tile_index}/{len(TILES)}: {tile_stem} (config {index}/{total_configs}) at {datetime.now().isoformat()}", flush=True)
-            run_result = _run_worker(tile_stem, tif_file, trial_folder, variant["weights"])
-            if run_result["returncode"] != 0 or not report_path.exists():
-                print(f"[WARN] [{index}/{total_configs}] Tile failed or report missing for {tile_stem} in {trial_name_base}")
-                per_tile_reports.append(
-                    {
+            pending_jobs.append(
+                {
+                    "index": index,
+                    "total_configs": total_configs,
+                    "trial_name_base": trial_name_base,
+                    "trial_folder": trial_folder,
+                    "tile_index": tile_index,
+                    "tile_report_index": tile_report_index,
+                    "tile_stem": tile_stem,
+                    "tif_file": tif_file,
+                    "report_path": report_path,
+                    "weights": variant["weights"],
+                }
+            )
+
+    if pending_jobs:
+        worker_count = min(parallel_jobs, len(pending_jobs))
+        if worker_count > 1 and cuda_available:
+            print(
+                f"[WARN] Parallel tile execution is enabled with a single visible GPU; "
+                f"speedup may be limited by GPU contention.",
+                flush=True,
+            )
+        print(f"[INFO] Launching {len(pending_jobs)} pending tile jobs with up to {worker_count} workers", flush=True)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(_run_worker, job["tile_stem"], job["tif_file"], job["trial_folder"], job["weights"]): job
+                for job in pending_jobs
+            }
+            for future in as_completed(futures):
+                job = futures[future]
+                trial_state = trial_states[job["index"] - 1]
+                per_tile_reports = trial_state["per_tile_reports"]
+                tile_report_index = job["tile_report_index"]
+                tile_stem = job["tile_stem"]
+                report_path = job["report_path"]
+
+                try:
+                    run_result = future.result()
+                except Exception as exc:
+                    run_result = {"returncode": 1, "elapsed_seconds": 0.0, "error": str(exc)}
+
+                if run_result["returncode"] != 0 or not report_path.exists():
+                    print(f"[WARN] [{job['index']}/{total_configs}] Tile failed or report missing for {tile_stem} in {job['trial_name_base']}")
+                    per_tile_reports[tile_report_index] = {
                         "tile": tile_stem,
                         "failed": True,
                         "returncode": run_result["returncode"],
                         "report_path": str(report_path),
                         "elapsed_seconds": float(run_result.get("elapsed_seconds", 0.0)),
                     }
-                )
+                else:
+                    with report_path.open("r", encoding="utf-8") as f:
+                        report = json.load(f)
+                    per_tile_reports[tile_report_index] = {
+                        "tile": tile_stem,
+                        "mean_iou": float(report.get("mean_iou", 0.0)),
+                        "pixel_accuracy": float(report.get("pixel_accuracy", 0.0)),
+                        "report_path": str(report_path),
+                        "cached": False,
+                        "elapsed_seconds": float(run_result.get("elapsed_seconds", 0.0)),
+                    }
+
                 processed_tile_runs += 1
-                elapsed_tile = (datetime.now() - started).total_seconds()
+                elapsed_tile = perf_counter() - run_start_perf
                 remaining_tile_runs = max(0, total_trials - processed_tile_runs)
                 tile_eta_seconds = (elapsed_tile / processed_tile_runs) * remaining_tile_runs if processed_tile_runs else 0.0
-                print(f"[INFO]   Overall remaining after failed tile ~ {_format_duration(tile_eta_seconds)}", flush=True)
-                continue
+                current_report = per_tile_reports[tile_report_index]
+                if current_report and not current_report.get("failed"):
+                    print(
+                        f"[INFO]   Tile {job['tile_index']}/{len(TILES)} done: mIoU={current_report['mean_iou']:.4f} | "
+                        f"overall remaining ~ {_format_duration(tile_eta_seconds)}",
+                        flush=True,
+                    )
+                else:
+                    print(f"[INFO]   Overall remaining after failed tile ~ {_format_duration(tile_eta_seconds)}", flush=True)
 
-            with report_path.open("r", encoding="utf-8") as f:
-                report = json.load(f)
-            per_tile_reports.append(
-                {
-                    "tile": tile_stem,
-                    "mean_iou": float(report.get("mean_iou", 0.0)),
-                    "pixel_accuracy": float(report.get("pixel_accuracy", 0.0)),
-                    "report_path": str(report_path),
-                    "cached": False,
-                    "elapsed_seconds": float(run_result.get("elapsed_seconds", 0.0)),
-                }
-            )
-            processed_tile_runs += 1
-            elapsed_tile = (datetime.now() - started).total_seconds()
-            remaining_tile_runs = max(0, total_trials - processed_tile_runs)
-            tile_eta_seconds = (elapsed_tile / processed_tile_runs) * remaining_tile_runs if processed_tile_runs else 0.0
-            print(
-                f"[INFO]   Tile {tile_index}/{len(TILES)} done: mIoU={per_tile_reports[-1]['mean_iou']:.4f} | "
-                f"overall remaining ~ {_format_duration(tile_eta_seconds)}"
-            , flush=True)
-
-        valid_reports = [item for item in per_tile_reports if not item.get("failed")]
+    for trial_state in trial_states:
+        per_tile_reports = trial_state["per_tile_reports"]
+        valid_reports = [item for item in per_tile_reports if item and not item.get("failed")]
+        trial_name_base = trial_state["trial_name"]
         summary = {
             "trial_name": trial_name_base,
-            "prompt": prompt_name,
-            "weight": weight,
-            "weights": variant["weights"],
-            "trial_folder": str(trial_folder),
+            "prompt": trial_state["prompt_name"],
+            "weight": trial_state["weight"],
+            "weights": trial_state["weights"],
+            "trial_folder": str(trial_state["trial_folder"]),
             "mean_iou_avg": float(mean([item["mean_iou"] for item in valid_reports])) if valid_reports else float("nan"),
             "mean_pixel_accuracy_avg": float(mean([item["pixel_accuracy"] for item in valid_reports])) if valid_reports else float("nan"),
             "per_tile_reports": per_tile_reports,
             "cache_key": CALIBRATION_CACHE_KEY,
             "used_cached_tiles": sum(1 for item in per_tile_reports if item.get("cached")),
-            "elapsed_seconds": float(perf_counter() - trial_started),
-            "failed_tiles": len(per_tile_reports) - len(valid_reports),
+            "elapsed_seconds": float(perf_counter() - trial_state["trial_started"]),
+            "failed_tiles": sum(1 for item in per_tile_reports if item and item.get("failed")),
         }
         results.append(summary)
 
-        trial_summary_path = trial_folder / "trial_summary.json"
+        trial_summary_path = trial_state["trial_folder"] / "trial_summary.json"
         with trial_summary_path.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, default=_json_default)
 
-        elapsed = (datetime.now() - started).total_seconds()
-        remaining = max(0, total_configs - index)
-        eta_seconds = (elapsed / index) * remaining if index else 0.0
+        completed_trials = len(results)
+        elapsed = perf_counter() - run_start_perf
+        remaining = max(0, total_configs - completed_trials)
+        eta_seconds = (elapsed / completed_trials) * remaining if completed_trials else 0.0
         print(
-            f"[INFO] [{index}/{total_configs}] Finished {trial_name_base}: "
+            f"[INFO] [{completed_trials}/{total_configs}] Finished {trial_name_base}: "
             f"mIoU={summary['mean_iou_avg']:.4f} | ETA ~ {_format_duration(eta_seconds)}"
         , flush=True)
 

@@ -81,6 +81,9 @@ export PYTHONUNBUFFERED=1
 CALIBRATION_CACHE_KEY="split_3tiles_steps5_v2"
 export CALIBRATION_OUTPUT_DIR="${OUTPUT_BASE_DIR}/Results/contrastive_calibration/${CALIBRATION_CACHE_KEY}"
 mkdir -p "$CALIBRATION_OUTPUT_DIR"
+export CALIBRATION_PARALLEL_JOBS="${SLURM_CPUS_PER_TASK:-8}"
+export PIPELINE_CACHE_ROOT="${PIPELINE_CACHE_ROOT:-/storage/scratch1/3/ibaracskay3}"
+mkdir -p "$PIPELINE_CACHE_ROOT"
 
 # Pipeline runtime environment flags
 export REQUIRE_CUDA=1
