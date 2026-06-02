@@ -3,11 +3,11 @@
 #SBATCH -A gts-pkastner3                     # Your PACE charge account
 #SBATCH -N 1                              # Request 1 node
 #SBATCH --ntasks-per-node=1               # One task
-#SBATCH --cpus-per-task=8                 # <-- INCREASED: Doubled for faster tile data loading
-#SBATCH --mem=64G                         # <-- INCREASED: Give data loaders room to cache arrays
-#SBATCH --gres=gpu:V100:1                 # Request 1 V100 GPU (Or change to A100:1 if your account allows)
-#SBATCH -t 02:00:00                       # <-- DECREASED: Walltime (Shorter queues schedule faster)
-#SBATCH -q inferno                        # Queue
+#SBATCH --cpus-per-task=6         # Optimized for data-loader multi-threading
+#SBATCH --mem=32G                 # Clean fit for the ~21GB actual footprint
+#SBATCH --gres=gpu:A100:1         # Ideal choice (or gpu:V100:1 if A100 is unavailable)
+#SBATCH -t 4:00:00               # Keep under 2 hours for priority scheduling
+#SBATCH -q inferno
 #SBATCH -o logs/job_%j.out                # Slurm standard output log
 #SBATCH -e logs/job_%j.err                # Slurm standard error log
 
@@ -81,7 +81,7 @@ export PYTHONUNBUFFERED=1
 CALIBRATION_CACHE_KEY="split_3tiles_steps5_v2"
 export CALIBRATION_OUTPUT_DIR="${OUTPUT_BASE_DIR}/Results/contrastive_calibration/${CALIBRATION_CACHE_KEY}"
 mkdir -p "$CALIBRATION_OUTPUT_DIR"
-export CALIBRATION_PARALLEL_JOBS="${SLURM_CPUS_PER_TASK:-8}"
+export CALIBRATION_PARALLEL_JOBS="${SLURM_CPUS_PER_TASK:-5}"
 export PIPELINE_CACHE_ROOT="${PIPELINE_CACHE_ROOT:-/storage/scratch1/3/ibaracskay3}"
 mkdir -p "$PIPELINE_CACHE_ROOT"
 

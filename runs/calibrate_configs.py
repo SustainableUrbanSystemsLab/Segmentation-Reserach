@@ -7,6 +7,7 @@ import re
 import runpy
 import subprocess
 import sys
+import os
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from itertools import product
@@ -338,6 +339,22 @@ def _worker_main(spec: dict[str, Any]) -> int:
     cfg.annotation_iou_xml_path = spec.get("xml_path") or spec.get("annotation_path")
     cfg.annotation_iou_output_dir = trial_dir / "annotation_iou"
     cfg.results_dir = trial_dir / "results"
+
+    # Ensure pipeline cache root is honored inside worker processes. If the
+    # driver/exporter set `PIPELINE_CACHE_ROOT` we propagate it into the
+    # config module so `get_cache_dir()` consistently writes to the same
+    # location instead of falling back to `cfg.results_dir` (which can live
+    # on limited per-user storage).
+    pipeline_cache_env = os.environ.get("PIPELINE_CACHE_ROOT", "").strip()
+    if pipeline_cache_env:
+        try:
+            cache_path = Path(pipeline_cache_env).expanduser()
+            setattr(cfg, "pipeline_cache_root", cache_path)
+            os.environ["PIPELINE_CACHE_ROOT"] = str(cache_path)
+            print(f"[WORKER] Using PIPELINE_CACHE_ROOT={cache_path}")
+        except Exception:
+            # Fall back silently; get_cache_dir will still choose a safe path.
+            pass
 
     filtered_output = _FilteredOutput(sys.stdout)
     with redirect_stdout(filtered_output), redirect_stderr(filtered_output):
