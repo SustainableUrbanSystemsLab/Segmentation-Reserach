@@ -6,15 +6,11 @@ import subprocess
 import sys
 from time import perf_counter
 import warnings
-
-# Reduce noisy cache warnings on Windows where symlinks are often unavailable.
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-
+import threading
+import time
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-# Use non-interactive Agg backend to avoid pixmap allocation errors on large images
 import matplotlib
 matplotlib.use("Agg")
 
@@ -83,6 +79,38 @@ if getattr(cfg, "dino_suppress_low_risk_warnings", False):
         hf_logging.set_verbosity_error()
     except Exception:
         pass
+
+
+# Lightweight progress printer to emit periodic heartbeats during long CPU-bound
+# operations so job logs remain alive and `tail -f` shows activity.
+class ProgressPrinter:
+    def __init__(self, message: str, interval: int = 30):
+        self.message = message
+        self.interval = int(interval)
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                print(f"[PROGRESS] {ts} - {self.message}", flush=True)
+            except Exception:
+                pass
+
+    def __enter__(self):
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=0.5)
+        except Exception:
+            pass
 
 from models.dino_processing import (
     build_dino_model_and_transform,
@@ -716,13 +744,14 @@ def process_large_tile(
             print(f"[INFO] [Tile {tile_idx}/{len(tile_coords)}] Falling back to automatic SAM on the tile")
 
     try:
-        tile_masks = generate_sam_masks_automatic_tiled(
-            sam_model,
-            cfg,
-            tile_img_model,
-            tile_origin=(y0, x0),
-            full_shape=img_model.shape[:2],
-        )
+        with ProgressPrinter(f"SAM tiled auto-generation for tile {tile_idx}", interval=30):
+            tile_masks = generate_sam_masks_automatic_tiled(
+                sam_model,
+                cfg,
+                tile_img_model,
+                tile_origin=(y0, x0),
+                full_shape=img_model.shape[:2],
+            )
         save_masks_cache(image_path, image_hash, tile_masks, get_cache_key_for_tile_masks(image_path, image_hash, tile_idx, len(tile_coords)))
         return tile_masks
     except Exception as exc:
@@ -730,13 +759,14 @@ def process_large_tile(
         print(f"[INFO] [Tile {tile_idx}/{len(tile_coords)}] Final fallback: automatic SAM on whole tile")
 
     try:
-        tile_masks = generate_sam_masks_automatic(
-            sam_model,
-            cfg,
-            tile_img_model,
-            tile_origin=(y0, x0),
-            full_shape=img_model.shape[:2],
-        )
+        with ProgressPrinter(f"SAM non-tiled auto-generation for tile {tile_idx}", interval=30):
+            tile_masks = generate_sam_masks_automatic(
+                sam_model,
+                cfg,
+                tile_img_model,
+                tile_origin=(y0, x0),
+                full_shape=img_model.shape[:2],
+            )
         save_masks_cache(image_path, image_hash, tile_masks, get_cache_key_for_tile_masks(image_path, image_hash, tile_idx, len(tile_coords)))
         return tile_masks
     except Exception as exc:
@@ -1134,13 +1164,15 @@ elif cfg.use_dino:
 
             log_stage("SAM model ready", stage_start)
             try:
-                masks = generate_sam_masks_automatic_tiled(sam, cfg, img_model)
+                with ProgressPrinter(f"SAM tiled auto-generation for {active_tif_file}", interval=30):
+                    masks = generate_sam_masks_automatic_tiled(sam, cfg, img_model)
                 save_masks_cache(active_tif_file, image_hash, masks, cache_key_masks_full)
             except Exception as exc:
                 log_pipeline_error("Automatic SAM tiled fallback failed", exc)
                 print("[INFO] Retrying with non-tiled automatic SAM")
                 try:
-                    masks = generate_sam_masks_automatic(sam, cfg, img_model)
+                    with ProgressPrinter(f"SAM non-tiled auto-generation for {active_tif_file}", interval=30):
+                        masks = generate_sam_masks_automatic(sam, cfg, img_model)
                     save_masks_cache(active_tif_file, image_hash, masks, cache_key_masks_full)
                 except Exception as retry_exc:
                     log_pipeline_error("Automatic SAM retry failed", retry_exc)
@@ -1172,13 +1204,15 @@ elif cfg.use_dino:
                 sam_fallback = sam_model_registry[cfg.sam_model_type](checkpoint=cfg.sam_checkpoint)
                 sam_fallback.to(device=sam_device)
                 try:
-                    masks = generate_sam_masks_automatic_tiled(sam_fallback, cfg, img_model)
+                    with ProgressPrinter(f"SAM tiled auto-generation (fallback) for {active_tif_file}", interval=30):
+                        masks = generate_sam_masks_automatic_tiled(sam_fallback, cfg, img_model)
                     save_masks_cache(active_tif_file, image_hash, masks, cache_key_masks_full)
                 except Exception as retry_exc:
                     log_pipeline_error("Automatic SAM fallback after DINO-SAM failure failed", retry_exc)
                     print("[INFO] Retrying with non-tiled automatic SAM")
                     try:
-                        masks = generate_sam_masks_automatic(sam_fallback, cfg, img_model)
+                        with ProgressPrinter(f"SAM non-tiled auto-generation (fallback) for {active_tif_file}", interval=30):
+                            masks = generate_sam_masks_automatic(sam_fallback, cfg, img_model)
                         save_masks_cache(active_tif_file, image_hash, masks, cache_key_masks_full)
                     except Exception as final_exc:
                         log_pipeline_error("Final automatic SAM fallback failed", final_exc)
@@ -1205,13 +1239,15 @@ else:
         
         log_stage("SAM model ready", stage_start)
         try:
-            masks = generate_sam_masks_automatic_tiled(sam, cfg, img_model)
+            with ProgressPrinter(f"SAM tiled auto-generation for {active_tif_file}", interval=30):
+                masks = generate_sam_masks_automatic_tiled(sam, cfg, img_model)
             save_masks_cache(active_tif_file, image_hash, masks, cache_key_masks_full)
         except Exception as exc:
             log_pipeline_error("Automatic SAM tiled generation failed", exc)
             print("[INFO] Retrying with non-tiled automatic SAM")
             try:
-                masks = generate_sam_masks_automatic(sam, cfg, img_model)
+                with ProgressPrinter(f"SAM non-tiled auto-generation for {active_tif_file}", interval=30):
+                    masks = generate_sam_masks_automatic(sam, cfg, img_model)
                 save_masks_cache(active_tif_file, image_hash, masks, cache_key_masks_full)
             except Exception as retry_exc:
                 log_pipeline_error("Automatic SAM retry failed", retry_exc)
@@ -2279,8 +2315,9 @@ def _build_prompt_strength_heatmap(
         from scipy.ndimage import distance_transform_edt
 
         print(f"[INFO] Prompt strength heatmap fill starting for {prompt_name}: uncovered pixels need nearest-neighbor fill")
-        _, indices = distance_transform_edt(~covered, return_indices=True)
-        score_map = score_map[tuple(indices)]
+        with ProgressPrinter(f"Prompt strength heatmap fill for {prompt_name}", interval=30):
+            _, indices = distance_transform_edt(~covered, return_indices=True)
+            score_map = score_map[tuple(indices)]
         print(f"[INFO] Prompt strength heatmap fill finished for {prompt_name}")
 
     return score_map, covered
