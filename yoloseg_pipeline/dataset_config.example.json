@@ -6,13 +6,17 @@
   "overwrite": true,
   "skip_empty_label_tiles": true,
   "train_tiles": [
+    "tile_000_000",
+    "tile_000_001",
     "tile_002_000",
     "tile_002_001",
     "tile_002_002",
     "tile_002_004",
-    "tile_002_005"
+    "tile_002_005",
+    "tile_002_006",
+    "tile_003_000"
   ],
-  "test_tiles": [
+  "val_tiles": [
     "tile_002_003"
   ]
 }

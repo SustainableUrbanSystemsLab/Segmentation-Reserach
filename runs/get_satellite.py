@@ -385,7 +385,8 @@ def get_cache_key_for_image_dino(image_path: str, image_hash: str) -> str:
 def get_cache_key_for_image_masks(image_path: str, image_hash: str) -> str:
     """Generate cache key for full-image SAM masks."""
     stem = Path(image_path).stem
-    return f"{stem}_hash{image_hash}_masks_full.pkl"
+    min_area = int(getattr(cfg, "sam_min_mask_area_px", 0))
+    return f"{stem}_hash{image_hash}_minarea{min_area}_masks_full.pkl"
 
 
 def get_cache_key_for_tile_dino(image_path: str, image_hash: str, tile_idx: int, tile_count: int) -> str:
@@ -397,7 +398,8 @@ def get_cache_key_for_tile_dino(image_path: str, image_hash: str, tile_idx: int,
 def get_cache_key_for_tile_masks(image_path: str, image_hash: str, tile_idx: int, tile_count: int) -> str:
     """Generate cache key for tiled SAM masks."""
     stem = Path(image_path).stem
-    return f"{stem}_hash{image_hash}_tile{tile_idx}-of-{tile_count}_masks.pkl"
+    min_area = int(getattr(cfg, "sam_min_mask_area_px", 0))
+    return f"{stem}_hash{image_hash}_tile{tile_idx}-of-{tile_count}_minarea{min_area}_masks.pkl"
 
 
 def get_cache_key_for_region_context_scoring(image_path: str, image_hash: str, prompt_signature: str) -> str:

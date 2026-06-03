@@ -77,9 +77,9 @@ else:
     PROMPTS = list(BASE_WEIGHTS.keys())
 
 _annotation_override = os.environ.get("CONTRASTIVE_ANNOTATION_PATH", "").strip()
-DELTA_STEP = 0.02
+DELTA_STEP = 0.03
 # Default steps each side for interactive runs (5 => 11 values per prompt => 55 configs)
-STEPS_EACH_SIDE = _env_int("STEPS_EACH_SIDE", 5)
+STEPS_EACH_SIDE = _env_int("STEPS_EACH_SIDE", 8)
 
 # Calibration resume/cache controls.
 # Change CALIBRATION_CACHE_KEY to start a fresh run folder.
