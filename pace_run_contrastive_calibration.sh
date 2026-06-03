@@ -3,14 +3,14 @@
 #SBATCH -A gts-pkastner3                     # Your PACE charge account
 #SBATCH -N 1                              # Request 1 node
 #SBATCH --ntasks-per-node=1               # One task
-#SBATCH --cpus-per-task=6         # Optimized for data-loader multi-threading
-#SBATCH --mem=48G                 # Clean fit for the ~21GB actual footprint
-#SBATCH --gres=gpu:L40S:1
-#SBATCH -t 1:30:00               # Keep under 2 hours for priority scheduling
-#SBATCH -q inferno
+#SBATCH --cpus-per-task=4                 # <-- FIXED: Complies with the strict 4:1 CPU:GPU ratio
+#SBATCH --mem=48G                         # Fits your ~21GB footprint with room to breathe
+#SBATCH -p gpu-l40s                       # <-- ADDED: Explicitly targets the L40S node class
+#SBATCH --gres=gpu:1                      # <-- FIXED: Standard generic resource format
+#SBATCH -t 02:00:00                       # Walltime under 2 hours for priority queueing
+#SBATCH -q inferno                        # Queue
 #SBATCH -o logs/job_%j.out                # Slurm standard output log
 #SBATCH -e logs/job_%j.err                # Slurm standard error log
-
 # ==========================================
 # 1. ENVIRONMENT & CLUSTER MODULE SETUP
 # ==========================================
