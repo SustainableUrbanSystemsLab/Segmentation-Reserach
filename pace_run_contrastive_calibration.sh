@@ -4,9 +4,9 @@
 #SBATCH -N 1                              # Request 1 node
 #SBATCH --ntasks-per-node=1               # One task
 #SBATCH --cpus-per-task=6         # Optimized for data-loader multi-threading
-#SBATCH --mem=32G                 # Clean fit for the ~21GB actual footprint
-#SBATCH --gres=gpu:A100:1         # Ideal choice (or gpu:V100:1 if A100 is unavailable)
-#SBATCH -t 4:00:00               # Keep under 2 hours for priority scheduling
+#SBATCH --mem=48G                 # Clean fit for the ~21GB actual footprint
+#SBATCH --gres=gpu:L40S:1
+#SBATCH -t 1:30:00               # Keep under 2 hours for priority scheduling
 #SBATCH -q inferno
 #SBATCH -o logs/job_%j.out                # Slurm standard output log
 #SBATCH -e logs/job_%j.err                # Slurm standard error log
