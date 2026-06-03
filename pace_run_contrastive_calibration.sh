@@ -3,10 +3,9 @@
 #SBATCH -A gts-pkastner3                     # Your PACE charge account
 #SBATCH -N 1                              # Request 1 node
 #SBATCH --ntasks-per-node=1               # One task
-#SBATCH --cpus-per-task=4                 # <-- FIXED: Complies with the strict 4:1 CPU:GPU ratio
-#SBATCH --mem=96G                         # Fits your ~21GB footprint with room to breathe
-#SBATCH -p gpu-l40s                       # <-- ADDED: Explicitly targets the L40S node class
-#SBATCH --gres=gpu:1                      # <-- FIXED: Standard generic resource format
+#SBATCH --cpus-per-task=4                 # Complies with the strict 4:1 CPU:GPU ratio
+#SBATCH --mem=96G                         # High host RAM cushion for your 3 parallel image processes
+#SBATCH --gres=gpu:l40s:1                 # <-- THE FIX: Lowercase 'l40s' targets the node class perfectly
 #SBATCH -t 02:00:00                       # Walltime under 2 hours for priority queueing
 #SBATCH -q inferno                        # Queue
 #SBATCH -o logs/job_%j.out                # Slurm standard output log
