@@ -4,7 +4,7 @@
 #SBATCH -N 1                              # Request 1 node
 #SBATCH --ntasks-per-node=1               # One task
 #SBATCH --cpus-per-task=4                 # <-- FIXED: Complies with the strict 4:1 CPU:GPU ratio
-#SBATCH --mem=48G                         # Fits your ~21GB footprint with room to breathe
+#SBATCH --mem=96G                         # Fits your ~21GB footprint with room to breathe
 #SBATCH -p gpu-l40s                       # <-- ADDED: Explicitly targets the L40S node class
 #SBATCH --gres=gpu:1                      # <-- FIXED: Standard generic resource format
 #SBATCH -t 02:00:00                       # Walltime under 2 hours for priority queueing
@@ -81,7 +81,55 @@ export PYTHONUNBUFFERED=1
 CALIBRATION_CACHE_KEY="split_3tiles_steps5_v2"
 export CALIBRATION_OUTPUT_DIR="${OUTPUT_BASE_DIR}/Results/contrastive_calibration/${CALIBRATION_CACHE_KEY}"
 mkdir -p "$CALIBRATION_OUTPUT_DIR"
-export CALIBRATION_PARALLEL_JOBS="${SLURM_CPUS_PER_TASK:-5}"
+
+# Memory-safe worker sizing:
+# - Read the Slurm memory allocation, then reserve only 2/3 of it for parallel workers.
+# - Assume each worker can peak at about 21 GB.
+# - Clamp by CPU availability so we do not spawn more workers than this job can reasonably support.
+SLURM_MEM_LIMIT_RAW="${SLURM_MEM_PER_NODE:-${SLURM_MEM_PER_CPU:-}}"
+MEM_LIMIT_MB=""
+if [ -n "$SLURM_MEM_LIMIT_RAW" ]; then
+    case "$SLURM_MEM_LIMIT_RAW" in
+        *[Gg])
+            MEM_LIMIT_MB=$(( ${SLURM_MEM_LIMIT_RAW%[Gg]} * 1024 ))
+            ;;
+        *[Mm])
+            MEM_LIMIT_MB=${SLURM_MEM_LIMIT_RAW%[Mm]}
+            ;;
+        *)
+            MEM_LIMIT_MB=$SLURM_MEM_LIMIT_RAW
+            ;;
+    esac
+fi
+
+if [ -z "$MEM_LIMIT_MB" ] || [ "$MEM_LIMIT_MB" -le 0 ] 2>/dev/null; then
+    MEM_LIMIT_MB=$((96 * 1024))
+fi
+
+MEM_WORKER_MB=$((21 * 1024))
+SAFE_MEM_WORKERS=$(( (MEM_LIMIT_MB * 2 / 3) / MEM_WORKER_MB ))
+if [ "$SAFE_MEM_WORKERS" -lt 1 ]; then
+    SAFE_MEM_WORKERS=1
+fi
+
+CPU_LIMIT_WORKERS="${SLURM_CPUS_PER_TASK:-5}"
+if [ -z "$CPU_LIMIT_WORKERS" ] || [ "$CPU_LIMIT_WORKERS" -lt 1 ] 2>/dev/null; then
+    CPU_LIMIT_WORKERS=1
+fi
+
+REQUESTED_PARALLEL_JOBS="${CALIBRATION_PARALLEL_JOBS:-$CPU_LIMIT_WORKERS}"
+if [ -z "$REQUESTED_PARALLEL_JOBS" ] || [ "$REQUESTED_PARALLEL_JOBS" -lt 1 ] 2>/dev/null; then
+    REQUESTED_PARALLEL_JOBS=1
+fi
+
+CALIBRATION_PARALLEL_JOBS="$REQUESTED_PARALLEL_JOBS"
+if [ "$CALIBRATION_PARALLEL_JOBS" -gt "$SAFE_MEM_WORKERS" ]; then
+    CALIBRATION_PARALLEL_JOBS="$SAFE_MEM_WORKERS"
+fi
+if [ "$CALIBRATION_PARALLEL_JOBS" -gt "$CPU_LIMIT_WORKERS" ]; then
+    CALIBRATION_PARALLEL_JOBS="$CPU_LIMIT_WORKERS"
+fi
+export CALIBRATION_PARALLEL_JOBS
 export PIPELINE_CACHE_ROOT="${PIPELINE_CACHE_ROOT:-/storage/scratch1/3/ibaracskay3}"
 mkdir -p "$PIPELINE_CACHE_ROOT"
 
@@ -96,6 +144,10 @@ export SAVE_INPUT_IMAGES=0
 echo "[INFO] Code Repository Root: ${PROJECT_ROOT}"
 echo "[INFO] High-Capacity Scratch Output: ${OUTPUT_BASE_DIR}"
 echo "[INFO] Calibration Output Target: ${CALIBRATION_OUTPUT_DIR}"
+echo "[INFO] Slurm memory limit raw: ${SLURM_MEM_LIMIT_RAW:-<unset>}"
+echo "[INFO] Memory-safe worker cap: ${SAFE_MEM_WORKERS} (2/3 of limit, ~21 GB/worker)"
+echo "[INFO] CPU worker cap: ${CPU_LIMIT_WORKERS}"
+echo "[INFO] Parallel workers selected: ${CALIBRATION_PARALLEL_JOBS}"
 
 if [ ! -x "$PYTHON_EXE" ]; then
     echo "[ERROR] Python executable not found at ${PYTHON_EXE}"
