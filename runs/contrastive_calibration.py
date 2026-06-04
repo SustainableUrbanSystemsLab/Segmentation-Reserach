@@ -54,11 +54,26 @@ _tiles_override = os.environ.get("CONTRASTIVE_TILES", "").strip()
 if _tiles_override:
     TILES = [tile.strip() for tile in _tiles_override.split(",") if tile.strip()]
 else:
-    TILES = [
-        "Maps/Tiles/Atlanta_split_google/tile_002_002.tif",
-        "Maps/Tiles/Atlanta_split_google/tile_002_003.tif",
-        "Maps/Tiles/Atlanta_split_google/tile_002_004.tif",
+    # Default tile stems relative to the tile base directory.
+    _DEFAULT_TILE_STEMS = [
+        "tile_002_002.tif",
+        "tile_002_003.tif",
+        "tile_002_004.tif",
     ]
+    # If CONTRASTIVE_TILE_BASE_DIR is set (exported by the PACE batch script),
+    # build absolute paths so the worker can find the files regardless of cwd.
+    # Fall back to the known absolute PACE path, then to repo-relative for local runs.
+    _tile_base_dir = os.environ.get("CONTRASTIVE_TILE_BASE_DIR", "").strip()
+    _PACE_TILE_BASE = "/storage/project/r-pkastner3-0/ibaracskay3/Segmentation-Reserach-Manual/Maps/Tiles/Atlanta_split_google"
+    if _tile_base_dir:
+        TILES = [str(Path(_tile_base_dir) / stem) for stem in _DEFAULT_TILE_STEMS]
+    elif Path(_PACE_TILE_BASE).is_dir():
+        TILES = [str(Path(_PACE_TILE_BASE) / stem) for stem in _DEFAULT_TILE_STEMS]
+    else:
+        TILES = [
+            str(PROJECT_ROOT / "Maps" / "Tiles" / "Atlanta_split_google" / stem)
+            for stem in _DEFAULT_TILE_STEMS
+        ]
 
 BASE_WEIGHTS = {
     "nen_cat_a": 0.68,

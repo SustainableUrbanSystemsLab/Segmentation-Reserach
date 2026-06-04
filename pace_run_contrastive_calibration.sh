@@ -157,25 +157,29 @@ fi
 echo "[INFO] Python executable: ${PYTHON_EXE}"
 echo "[INFO] Active conda env: ${SEG_CONDA_ENV}"
 
-# Tile location roots for single-tile runs.
+# Tile location roots.
 # Priority:
 # 1) explicit TILE_BASE_DIR env var
-# 2) local repo path
-# 3) PACE shared project path
-LOCAL_TILE_BASE="${PROJECT_ROOT}/Maps/Tiles/Atlanta_split_google"
+# 2) PACE absolute path (primary on cluster)
+# 3) local repo path (fallback for local runs)
 PACE_TILE_BASE="/storage/project/r-pkastner3-0/ibaracskay3/Segmentation-Reserach-Manual/Maps/Tiles/Atlanta_split_google"
+LOCAL_TILE_BASE="${PROJECT_ROOT}/Maps/Tiles/Atlanta_split_google"
 
 if [ -n "${TILE_BASE_DIR:-}" ]; then
     RESOLVED_TILE_BASE="$TILE_BASE_DIR"
-elif [ -d "$LOCAL_TILE_BASE" ]; then
-    RESOLVED_TILE_BASE="$LOCAL_TILE_BASE"
 elif [ -d "$PACE_TILE_BASE" ]; then
     RESOLVED_TILE_BASE="$PACE_TILE_BASE"
-else
+elif [ -d "$LOCAL_TILE_BASE" ]; then
     RESOLVED_TILE_BASE="$LOCAL_TILE_BASE"
+else
+    RESOLVED_TILE_BASE="$PACE_TILE_BASE"
 fi
 
 echo "[INFO] Tile base directory: ${RESOLVED_TILE_BASE}"
+
+# Export the resolved tile base so contrastive_calibration.py can build
+# absolute paths even when CONTRASTIVE_TILES is not set (i.e. full-run mode).
+export CONTRASTIVE_TILE_BASE_DIR="$RESOLVED_TILE_BASE"
 
 # ==========================================
 # 3. RUN MODES (SINGLE TILE VS FULL RUN)
