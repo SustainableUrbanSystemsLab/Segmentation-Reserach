@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=4                 # Complies with the strict 4:1 CPU:GPU ratio
 #SBATCH --mem=96G                         # High host RAM cushion for your 3 parallel image processes
 #SBATCH --gres=gpu:l40s:1                 # <-- THE FIX: Lowercase 'l40s' targets the node class perfectly
-#SBATCH -t 12:00:00                       # Walltime under 2 hours for priority queueing
+#SBATCH -t 14:00:00                       # Walltime under 2 hours for priority queueing
 #SBATCH -q inferno                        # Queue
 #SBATCH -o logs/job_%j.out                # Slurm standard output log
 #SBATCH -e logs/job_%j.err                # Slurm standard error log

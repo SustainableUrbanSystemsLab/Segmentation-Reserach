@@ -318,7 +318,12 @@ def log_pipeline_error(context: str, exc: Exception) -> None:
 import pickle
 
 def build_pipeline_cache_scope_signature(prompt_configs: list[dict]) -> str:
-    """Build a stable cache scope for the active prompt and runtime configuration."""
+    """Build a stable cache scope for the active prompt and runtime configuration.
+
+    FULL scope — includes contrastive weights and assignment-mode params.
+    Used only for region-context CLIP scoring caches, where weights change
+    which category each region is assigned to.
+    """
     import hashlib
     import json
 
@@ -361,8 +366,58 @@ def build_pipeline_cache_scope_signature(prompt_configs: list[dict]) -> str:
     return hashlib.md5(scope_text.encode("utf-8")).hexdigest()[:16]
 
 
+def build_sam_cache_scope_signature(prompt_configs: list[dict]) -> str:
+    """Build a cache scope that covers ONLY parameters that affect SAM mask geometry.
+
+    Critically, this excludes contrastive_prompt_weights, tier thresholds,
+    pixel_assignment_mode, and full_image_mask_mode — all of which are applied
+    AFTER masks are generated.  This means every calibration trial that shares
+    the same prompt captions / DINO / SAM generation settings will hit the SAME
+    SAM cache directory, regardless of which weight combination is being tested.
+    This is the correct behaviour: mask geometry does not depend on how we later
+    assign those masks to categories.
+    """
+    import hashlib
+    import json
+
+    scope_payload = {
+        # Prompt captions + CLIP settings affect DINO box selection → SAM inputs
+        "prompt_signature": build_region_context_prompt_signature(prompt_configs),
+        # SAM generation params
+        "sam_min_mask_area_px": int(getattr(cfg, "sam_min_mask_area_px", 0)),
+        "sam_auto_max_total_masks": int(getattr(cfg, "sam_auto_max_total_masks", 0)),
+        "sam_full_resolution": bool(getattr(cfg, "sam_full_resolution", False)),
+        "sam_points_per_side": int(getattr(cfg, "sam_points_per_side", 0)),
+        "sam_pred_iou_thresh": float(getattr(cfg, "sam_pred_iou_thresh", 0.0)),
+        "sam_stability_score_thresh": float(getattr(cfg, "sam_stability_score_thresh", 0.0)),
+        "sam_auto_tile_size_px": int(getattr(cfg, "sam_auto_tile_size_px", 0)),
+        "sam_auto_tile_overlap_px": int(getattr(cfg, "sam_auto_tile_overlap_px", 0)),
+        # DINO params that change which boxes feed into SAM
+        "dino_enable_tiled_fallback": bool(getattr(cfg, "dino_enable_tiled_fallback", True)),
+        "dino_enable_area_split": bool(getattr(cfg, "dino_enable_area_split", False)),
+        "dino_refine_bounds": bool(getattr(cfg, "dino_refine_bounds", False)),
+        "dino_full_resolution": bool(getattr(cfg, "dino_full_resolution", False)),
+        "dino_resize_short_side": int(getattr(cfg, "dino_resize_short_side", 0)),
+        "dino_resize_max_size": int(getattr(cfg, "dino_resize_max_size", 0)),
+        "dino_nms_iou_threshold": float(getattr(cfg, "dino_nms_iou_threshold", 0.0)),
+        "dino_max_boxes_per_prompt_for_sam": int(getattr(cfg, "dino_max_boxes_per_prompt_for_sam", 0)),
+        "dino_tile_size_px": int(getattr(cfg, "dino_tile_size_px", 0)),
+        "dino_tile_overlap_px": int(getattr(cfg, "dino_tile_overlap_px", 0)),
+        "large_image_tile_size_px": int(getattr(cfg, "large_image_tile_size_px", 0)),
+        "large_image_tile_overlap_px": int(getattr(cfg, "large_image_tile_overlap_px", 0)),
+        # NOT included: contrastive_prompt_weights, tier_*_threshold,
+        # pixel_assignment_mode, full_image_mask_mode, coarse_to_fine_cell_px
+    }
+    scope_text = json.dumps(scope_payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(scope_text.encode("utf-8")).hexdigest()[:16]
+
+
 def get_cache_dir() -> Path:
-    """Return cache directory, creating it if needed."""
+    """Return cache directory for region-context CLIP scoring (full scope including weights).
+
+    Use get_sam_cache_dir() for DINO / SAM mask caches instead — those are
+    shared across trials that differ only in downstream assignment parameters.
+    """
     cache_root_env = os.environ.get("PIPELINE_CACHE_ROOT", "").strip()
     if cache_root_env:
         cache_root = Path(cache_root_env).expanduser()
@@ -372,6 +427,28 @@ def get_cache_dir() -> Path:
     prompt_configs = list(getattr(cfg, "dino_prompt_configs", []) or [])
     cache_scope = build_pipeline_cache_scope_signature(prompt_configs)
     cache_dir = cache_root / cache_scope
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def get_sam_cache_dir() -> Path:
+    """Return the shared SAM/DINO cache directory (mask-geometry scope only).
+
+    This directory is shared across ALL calibration trials that use the same
+    prompt captions and SAM/DINO generation parameters, regardless of which
+    contrastive weights or tier thresholds are being tested.  Storing and
+    loading DINO boxes and SAM masks from this directory means each unique
+    (tile, prompt-config, SAM-config) combination is only ever computed once.
+    """
+    cache_root_env = os.environ.get("PIPELINE_CACHE_ROOT", "").strip()
+    if cache_root_env:
+        cache_root = Path(cache_root_env).expanduser()
+    else:
+        cache_root = Path(getattr(cfg, "pipeline_cache_root", cfg.results_dir / ".segmentation_cache"))
+
+    prompt_configs = list(getattr(cfg, "dino_prompt_configs", []) or [])
+    sam_scope = build_sam_cache_scope_signature(prompt_configs)
+    cache_dir = cache_root / f"sam_{sam_scope}"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
@@ -521,6 +598,7 @@ def load_region_context_scoring_cache(
         cache_dir = get_cache_dir()
         cache_file = cache_dir / file_context
         if not cache_file.exists():
+            print(f"[CACHE MISS] Region-context scoring: no cache file found ({file_context})")
             return None
 
         # If masking caching is skipped we still wrote metadata; however the
@@ -529,18 +607,18 @@ def load_region_context_scoring_cache(
         with open(cache_file, "rb") as f:
             data = pickle.load(f)
         if data.get("prompt_signature") != prompt_signature:
-            print(f"[INFO] Ignoring region-context cache with mismatched prompt signature: {cache_file.name}")
+            print(f"[CACHE MISS] Region-context scoring: prompt signature mismatch, ignoring ({cache_file.name})")
             return None
 
         if bool(getattr(cfg, "skip_mask_caching", True)):
-            print(f"[INFO] Region-context cache exists but contains metadata only: {cache_file.name}")
+            print(f"[CACHE HIT (metadata only)] Region-context scoring: metadata exists but skip_mask_caching=True, arrays not stored — will re-score ({cache_file.name})")
             return None
 
         region_context_masks = data.get("region_context_masks")
         if not isinstance(region_context_masks, list) or not region_context_masks:
             return None
 
-        print(f"[INFO] Loaded region-context scoring cache: {cache_file.name}")
+        print(f"[CACHE HIT] Region-context scoring: loaded {len(region_context_masks)} masks from {cache_file.name}")
         return region_context_masks
     except Exception as exc:
         print(f"[WARN] Failed to load region-context scoring cache: {exc}")
@@ -548,7 +626,7 @@ def load_region_context_scoring_cache(
 
 
 def save_dino_cache(image_path: str, image_hash: str, dino_records: list | None, file_context: str) -> bool:
-    """Save DINO results to cache. Returns True if saved, False otherwise."""
+    """Save DINO results to shared SAM cache (mask-geometry scope, weight-independent)."""
     if not bool(getattr(cfg, "enable_pipeline_caching", True)):
         return False
     if dino_records is None:
@@ -557,13 +635,13 @@ def save_dino_cache(image_path: str, image_hash: str, dino_records: list | None,
     if len(dino_records) == 0 and not cache_empty_dino:
         print("[INFO] Skipping DINO cache write for empty result set")
         return False
-    
+
     try:
-        cache_dir = get_cache_dir()
+        cache_dir = get_sam_cache_dir()
         cache_file = cache_dir / file_context
         with open(cache_file, "wb") as f:
             pickle.dump({"dino_records": dino_records}, f)
-        print(f"[INFO] Cached DINO results: {cache_file.name}")
+        print(f"[CACHE SAVE] DINO: {len(dino_records)} boxes → {cache_file.name}  (shared SAM scope)")
         return True
     except Exception as e:
         print(f"[WARN] Failed to save DINO cache: {e}")
@@ -571,18 +649,19 @@ def save_dino_cache(image_path: str, image_hash: str, dino_records: list | None,
 
 
 def load_dino_cache(image_path: str, image_hash: str, file_context: str) -> list | None:
-    """Load DINO results from cache. Returns None if not found or caching disabled."""
+    """Load DINO results from shared SAM cache (mask-geometry scope, weight-independent)."""
     if not bool(getattr(cfg, "enable_pipeline_caching", True)):
         return None
     if bool(getattr(cfg, "overwrite_pipeline_cache", False)):
         return None
-    
+
     try:
-        cache_dir = get_cache_dir()
+        cache_dir = get_sam_cache_dir()
         cache_file = cache_dir / file_context
         if not cache_file.exists():
+            print(f"[CACHE MISS] DINO: no cache file found ({file_context})")
             return None
-        
+
         with open(cache_file, "rb") as f:
             data = pickle.load(f)
         cached_records = data.get("dino_records")
@@ -590,7 +669,7 @@ def load_dino_cache(image_path: str, image_hash: str, file_context: str) -> list
         if isinstance(cached_records, list) and len(cached_records) == 0 and not cache_empty_dino:
             print(f"[INFO] Ignoring empty DINO cache entry: {cache_file.name}")
             return None
-        print(f"[INFO] Loaded DINO from cache: {cache_file.name}")
+        print(f"[CACHE HIT] DINO: loaded {len(cached_records) if cached_records else 0} boxes from {cache_file.name}  (shared SAM scope)")
         return cached_records
     except Exception as e:
         print(f"[WARN] Failed to load DINO cache: {e}")
@@ -598,7 +677,7 @@ def load_dino_cache(image_path: str, image_hash: str, file_context: str) -> list
 
 
 def save_masks_cache(image_path: str, image_hash: str, masks: list | None, file_context: str) -> bool:
-    """Save SAM masks to cache. Returns True if saved, False otherwise."""
+    """Save SAM masks to shared SAM cache (mask-geometry scope, weight-independent)."""
     if not bool(getattr(cfg, "enable_pipeline_caching", True)):
         return False
     if masks is None or not masks:
@@ -609,7 +688,7 @@ def save_masks_cache(image_path: str, image_hash: str, masks: list | None, file_
     # without storing multi-GB segmentation arrays per trial.
     if bool(getattr(cfg, "skip_mask_caching", True)):
         try:
-            cache_dir = get_cache_dir()
+            cache_dir = get_sam_cache_dir()
             cache_file = cache_dir / file_context
             masks_meta = []
             for m in masks:
@@ -624,18 +703,18 @@ def save_masks_cache(image_path: str, image_hash: str, masks: list | None, file_
 
             with open(cache_file, "wb") as f:
                 pickle.dump({"masks_meta": masks_meta, "num_masks": len(masks)}, f)
-            print(f"[INFO] Cached SAM masks metadata (no segmentation arrays): {cache_file.name}")
+            print(f"[CACHE SAVE] SAM masks metadata ({len(masks)} masks, no arrays) → {cache_file.name}  (shared SAM scope)")
             return True
         except Exception as e:
             print(f"[WARN] Failed to save masks cache metadata: {e}")
             return False
 
     try:
-        cache_dir = get_cache_dir()
+        cache_dir = get_sam_cache_dir()
         cache_file = cache_dir / file_context
         with open(cache_file, "wb") as f:
             pickle.dump({"masks": masks}, f)
-        print(f"[INFO] Cached {len(masks)} SAM masks: {cache_file.name}")
+        print(f"[CACHE SAVE] SAM masks: {len(masks)} masks → {cache_file.name}  (shared SAM scope)")
         return True
     except Exception as e:
         print(f"[WARN] Failed to save masks cache: {e}")
@@ -643,29 +722,30 @@ def save_masks_cache(image_path: str, image_hash: str, masks: list | None, file_
 
 
 def load_masks_cache(image_path: str, image_hash: str, file_context: str) -> list | None:
-    """Load SAM masks from cache. Returns None if not found or caching disabled."""
+    """Load SAM masks from shared SAM cache (mask-geometry scope, weight-independent)."""
     if not bool(getattr(cfg, "enable_pipeline_caching", True)):
         return None
     if bool(getattr(cfg, "overwrite_pipeline_cache", False)):
         return None
-    
+
     try:
-        cache_dir = get_cache_dir()
+        cache_dir = get_sam_cache_dir()
         cache_file = cache_dir / file_context
         if not cache_file.exists():
+            print(f"[CACHE MISS] SAM masks: no cache file found ({file_context})")
             return None
-        
+
         with open(cache_file, "rb") as f:
             data = pickle.load(f)
 
         # If we are skipping mask caching then cache files only contain
         # metadata and cannot be used to restore segmentation arrays.
         if bool(getattr(cfg, "skip_mask_caching", True)):
-            print(f"[INFO] Found masks cache metadata but skipping full restore: {cache_file.name}")
+            print(f"[CACHE HIT (metadata only)] SAM masks: metadata exists but skip_mask_caching=True, arrays not stored — will re-run SAM ({cache_file.name})")
             return None
 
         masks = data.get("masks")
-        print(f"[INFO] Loaded {len(masks) if masks else 0} masks from cache: {cache_file.name}")
+        print(f"[CACHE HIT] SAM masks: loaded {len(masks) if masks else 0} masks from {cache_file.name}  (shared SAM scope)")
         return masks
     except Exception as e:
         print(f"[WARN] Failed to load masks cache: {e}")
@@ -703,7 +783,7 @@ def process_large_tile(
     tile_dino_records: list[dict] = []
     if cached_dino is not None:
         tile_dino_records = cached_dino
-        print(f"[INFO] [Tile {tile_idx}/{len(tile_coords)}] Using cached DINO results ({len(tile_dino_records)} boxes)")
+        print(f"[CACHE HIT] DINO [Tile {tile_idx}/{len(tile_coords)}]: reusing {len(tile_dino_records)} cached boxes  (shared SAM scope)")
     else:
         try:
             tile_dino_records, _, _ = run_dino_prompts(
@@ -727,7 +807,7 @@ def process_large_tile(
         cached_masks = load_masks_cache(image_path, image_hash, cache_key_masks)
         
         if cached_masks is not None:
-            print(f"[INFO] [Tile {tile_idx}/{len(tile_coords)}] Using cached SAM masks ({len(cached_masks)} masks)")
+            print(f"[CACHE HIT] SAM masks [Tile {tile_idx}/{len(tile_coords)}]: reusing {len(cached_masks)} cached masks  (shared SAM scope)")
             return cached_masks
         
         try:
@@ -903,6 +983,44 @@ log_stage("Image preprocessing complete", preprocessing_start)
 image_hash = compute_image_hash(img_model)
 print(f"[INFO] Image hash for caching: {image_hash}")
 
+# ------------------------------------------------------------------
+# CACHE DIAGNOSTIC: print the scope hash and what's driving it so
+# we can verify whether this trial will share or create a new cache.
+# ------------------------------------------------------------------
+_cache_enabled = bool(getattr(cfg, "enable_pipeline_caching", True))
+_overwrite_cache = bool(getattr(cfg, "overwrite_pipeline_cache", False))
+_skip_mask_caching = bool(getattr(cfg, "skip_mask_caching", True))
+_contrastive_weights = dict(getattr(cfg, "contrastive_prompt_weights", {}) or {})
+_prompt_configs_for_scope = list(getattr(cfg, "dino_prompt_configs", []) or [])
+_cache_scope = build_pipeline_cache_scope_signature(_prompt_configs_for_scope)
+_sam_scope = build_sam_cache_scope_signature(_prompt_configs_for_scope)
+_cache_root_env = os.environ.get("PIPELINE_CACHE_ROOT", "").strip()
+_cache_root = (
+    Path(_cache_root_env).expanduser()
+    if _cache_root_env
+    else Path(getattr(cfg, "pipeline_cache_root", cfg.results_dir / ".segmentation_cache"))
+)
+_sam_cache_dir = _cache_root / f"sam_{_sam_scope}"
+_scoring_cache_dir = _cache_root / _cache_scope
+_existing_sam_files = list(_sam_cache_dir.glob("*.pkl")) if _sam_cache_dir.exists() else []
+
+print(f"[CACHE] Pipeline caching enabled={_cache_enabled} | overwrite={_overwrite_cache} | skip_mask_arrays={_skip_mask_caching}")
+print(f"[CACHE] Cache root: {_cache_root}")
+print(f"[CACHE] SAM/DINO scope hash (weight-independent): {_sam_scope}")
+print(f"[CACHE]   SAM cache dir: {_sam_cache_dir}")
+print(f"[CACHE] Scoring scope hash (includes weights): {_cache_scope}")
+print(f"[CACHE]   Scoring cache dir: {_scoring_cache_dir}")
+print(f"[CACHE] Contrastive weights for this trial: {_contrastive_weights}")
+if _existing_sam_files:
+    print(f"[CACHE] ✓ Found {len(_existing_sam_files)} existing SAM/DINO cache file(s) — DINO+SAM will be REUSED for this tile:")
+    for _cf in sorted(_existing_sam_files):
+        print(f"[CACHE]   {_cf.name}")
+else:
+    print(f"[CACHE] ✗ No existing SAM/DINO cache files — DINO+SAM will run from scratch and populate the shared cache.")
+print(f"[CACHE] NOTE: All trials sharing the same prompt captions + SAM/DINO params share ONE SAM cache,")
+print(f"[CACHE]       regardless of contrastive weights. Only the first trial pays the SAM inference cost.")
+# ------------------------------------------------------------------
+
 # If requested, skip heavy processing when visualizations + IoU already exist.
 if bool(getattr(cfg, "skip_if_visualizations_exist", True)):
     try:
@@ -989,11 +1107,12 @@ elif cfg.use_dino:
     cached_dino_records = load_dino_cache(active_tif_file, image_hash, cache_key_dino_full)
     
     if cached_dino_records is not None:
-        print(f"[INFO] Using cached DINO results ({len(cached_dino_records)} boxes)")
+        print(f"[CACHE HIT] DINO full-image: reusing {len(cached_dino_records)} cached boxes — skipping DINO inference")
         dino_records = cached_dino_records
         dino_unfiltered_records = []
         dino_filtered_records = []
     else:
+        print(f"[CACHE MISS] DINO full-image: running DINO inference for tile={Path(active_tif_file).stem} scope={_sam_scope}")
         print("[DEBUG] About to call run_dino_prompts", flush=True)
         try:
             dino_records, dino_unfiltered_records, dino_filtered_records = run_dino_prompts(
@@ -1156,9 +1275,10 @@ elif cfg.use_dino:
         cache_key_masks_full = get_cache_key_for_image_masks(active_tif_file, image_hash)
         cached_masks = load_masks_cache(active_tif_file, image_hash, cache_key_masks_full)
         if cached_masks is not None:
-            print(f"[INFO] Using cached SAM masks ({len(cached_masks)} masks)")
+            print(f"[CACHE HIT] SAM masks (DINO-fallback path): reusing {len(cached_masks)} cached masks — skipping SAM inference")
             masks = cached_masks
         else:
+            print(f"[CACHE MISS] SAM masks (DINO-fallback path): running SAM inference for tile={Path(active_tif_file).stem} scope={_sam_scope}")
             ensure_checkpoint(cfg.sam_checkpoint, cfg.sam_checkpoint_url)
             print(f"[INFO] Loading SAM model '{cfg.sam_model_type}' on device '{device}'")
             sam = sam_model_registry[cfg.sam_model_type](checkpoint=cfg.sam_checkpoint)
@@ -1190,11 +1310,12 @@ elif cfg.use_dino:
         cache_key_masks_full = get_cache_key_for_image_masks(active_tif_file, image_hash)
         cached_masks = load_masks_cache(active_tif_file, image_hash, cache_key_masks_full)
         if cached_masks is not None:
-            print(f"[INFO] Using cached SAM masks ({len(cached_masks)} masks)")
+            print(f"[CACHE HIT] SAM masks (DINO+SAM path): reusing {len(cached_masks)} cached masks — skipping SAM inference")
             masks = cached_masks
             from models.sam_processing import resolve_device
             sam_device = resolve_device(cfg.sam_device)
         else:
+            print(f"[CACHE MISS] SAM masks (DINO+SAM path): running SAM inference for tile={Path(active_tif_file).stem} scope={_sam_scope}")
             predictor, sam_device = build_sam_predictor(cfg, img_model)
             log_stage("SAM model ready", stage_start)
             try:
@@ -1231,9 +1352,10 @@ else:
     cache_key_masks_full = get_cache_key_for_image_masks(active_tif_file, image_hash)
     cached_masks = load_masks_cache(active_tif_file, image_hash, cache_key_masks_full)
     if cached_masks is not None:
-        print(f"[INFO] Using cached SAM masks ({len(cached_masks)} masks)")
+        print(f"[CACHE HIT] SAM masks (auto path): reusing {len(cached_masks)} cached masks — skipping SAM inference")
         masks = cached_masks
     else:
+        print(f"[CACHE MISS] SAM masks (auto path): running SAM inference for tile={Path(active_tif_file).stem} scope={_sam_scope}")
         ensure_checkpoint(cfg.sam_checkpoint, cfg.sam_checkpoint_url)
         print(f"[INFO] Loading SAM model '{cfg.sam_model_type}' on device '{device}'")
         sam = sam_model_registry[cfg.sam_model_type](checkpoint=cfg.sam_checkpoint)
@@ -1877,7 +1999,7 @@ if cached_region_context_masks is not None:
     region_context_masks = cached_region_context_masks
     total_scored_masks = len(region_context_masks)
     print(
-        f"[INFO] Using cached region-context CLIP scores ({total_scored_masks} shared SAM regions)"
+        f"[CACHE HIT] Region-context CLIP scoring: reusing {total_scored_masks} cached scored regions — skipping CLIP re-scoring"
     )
 
 if cached_region_context_masks is None:
