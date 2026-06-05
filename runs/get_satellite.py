@@ -2421,7 +2421,7 @@ if bool(getattr(cfg, "enable_annotation_iou_check", False)):
             combined_masks,
             xml_path=getattr(cfg, "annotation_iou_xml_path", None),
             output_dir=getattr(cfg, "annotation_iou_output_dir", None),
-            search_root=PROJECT_ROOT / "Maps" / "Tiles",
+        search_root=Path(active_tif_file).parent if getattr(cfg, "annotation_iou_xml_path", None) is None else PROJECT_ROOT / "Maps" / "Tiles",
             class_mode=getattr(cfg, "annotation_iou_class_mode", None),
         )
         print(
@@ -2477,7 +2477,7 @@ for pname, pmask in combined_masks.items():
     print(f"[DEBUG]   {pname}: {pmask.sum():,} pixels ({pmask.sum() / pmask.size * 100:.2f}% coverage)")
 
 print("[INFO] Starting visualization generation")
-faulthandler.dump_traceback_later(120, repeat=False)
+faulthandler.dump_traceback_later(600, repeat=False)
 viz_img = img_display[::viz_stride, ::viz_stride]
 
 # Colors for different prompts (explicit and high-contrast for reliable legend matching)
