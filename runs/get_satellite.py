@@ -421,8 +421,12 @@ def get_cache_dir() -> Path:
     cache_root_env = os.environ.get("PIPELINE_CACHE_ROOT", "").strip()
     if cache_root_env:
         cache_root = Path(cache_root_env).expanduser()
+    elif hasattr(cfg, "pipeline_cache_root") and cfg.pipeline_cache_root:
+        cache_root = Path(cfg.pipeline_cache_root)
     else:
-        cache_root = Path(getattr(cfg, "pipeline_cache_root", cfg.results_dir / ".segmentation_cache"))
+        # Hard fallback: always use scratch, never home/results_dir.
+        # cfg.results_dir is under the home quota and must not accumulate cache.
+        cache_root = Path("/storage/scratch1/3/ibaracskay3")
 
     prompt_configs = list(getattr(cfg, "dino_prompt_configs", []) or [])
     cache_scope = build_pipeline_cache_scope_signature(prompt_configs)
@@ -443,8 +447,11 @@ def get_sam_cache_dir() -> Path:
     cache_root_env = os.environ.get("PIPELINE_CACHE_ROOT", "").strip()
     if cache_root_env:
         cache_root = Path(cache_root_env).expanduser()
+    elif hasattr(cfg, "pipeline_cache_root") and cfg.pipeline_cache_root:
+        cache_root = Path(cfg.pipeline_cache_root)
     else:
-        cache_root = Path(getattr(cfg, "pipeline_cache_root", cfg.results_dir / ".segmentation_cache"))
+        # Hard fallback: always use scratch, never home/results_dir.
+        cache_root = Path("/storage/scratch1/3/ibaracskay3")
 
     prompt_configs = list(getattr(cfg, "dino_prompt_configs", []) or [])
     sam_scope = build_sam_cache_scope_signature(prompt_configs)
@@ -998,7 +1005,11 @@ _cache_root_env = os.environ.get("PIPELINE_CACHE_ROOT", "").strip()
 _cache_root = (
     Path(_cache_root_env).expanduser()
     if _cache_root_env
-    else Path(getattr(cfg, "pipeline_cache_root", cfg.results_dir / ".segmentation_cache"))
+    else (
+        Path(cfg.pipeline_cache_root)
+        if hasattr(cfg, "pipeline_cache_root") and cfg.pipeline_cache_root
+        else Path("/storage/scratch1/3/ibaracskay3")
+    )
 )
 _sam_cache_dir = _cache_root / f"sam_{_sam_scope}"
 _scoring_cache_dir = _cache_root / _cache_scope
