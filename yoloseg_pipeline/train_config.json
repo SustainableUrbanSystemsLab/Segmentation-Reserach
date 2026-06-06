@@ -1,9 +1,10 @@
 {
   "_comment": "Default training configuration for the YOLOv11 wind comfort segmentation pipeline.",
-  "_comment_cls_pw": "cls_pw = class weights power for handling class imbalance. 0.0 = disabled (uniform weights). 1.0 = full inverse-frequency weighting, automatically computed from the dataset. NEN_C and Uncomfortable are chronically under-predicted; setting cls_pw=1.0 makes Ultralytics upweight them automatically based on how rare they are.",
-  "_comment_cls": "cls = overall classification loss weight relative to box/mask losses. Default Ultralytics value is 0.5. Raising to 1.0 doubles the classification signal.",
+  "_comment_dataset": "Points to the pre-sliced dataset (1280x1280 chips). Run dataset_converter.py first: python yoloseg_pipeline/dataset_converter.py --config yoloseg_pipeline/dataset_config.json",
+  "_comment_cache": "cache=true loads all chips into RAM once at the start of training. With 1280px chips (~300-500 images) this is feasible and eliminates repeated disk I/O.",
+  "_comment_cls_pw": "cls_pw=1.0 applies automatic inverse-frequency class weighting to help NEN_C and Uncomfortable which are chronically under-predicted.",
 
-  "data": "data/yoloseg_windcomfort_rgb/dataset.yaml",
+  "data": "data/yoloseg_windcomfort_rgb_sliced/dataset.yaml",
   "model": "yolo11n-seg.pt",
   "epochs": 100,
   "batch": 8,
@@ -12,7 +13,7 @@
   "project": "results/yoloseg",
   "name": "wind_comfort_seg",
   "resume": false,
-  "cache": false,
+  "cache": true,
 
   "cls": 1.0,
   "cls_pw": 1.0,

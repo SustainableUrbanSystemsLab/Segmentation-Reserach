@@ -82,7 +82,14 @@ def _parse_args(config: dict) -> argparse.Namespace:
     )
     parser.add_argument("--name", default=config.get("name", "wind_comfort_seg"))
     parser.add_argument("--resume", action="store_true", default=config.get("resume", False))
-    parser.add_argument("--cache", action="store_true", default=config.get("cache", False))
+    parser.add_argument(
+        "--cache",
+        type=str,
+        default=str(config.get("cache", "false")).lower(),
+        help="Image caching: 'false' (off), 'true'/'ram' (cache in RAM), 'disk' (cache on disk). "
+             "RAM caching eliminates per-epoch disk I/O once chips are pre-loaded. "
+             "Safe to use when the sliced chip dataset fits in memory.",
+    )
 
     # --- Class imbalance controls ---
     parser.add_argument(
@@ -170,6 +177,15 @@ def main() -> int:
 
     model = YOLO(args.model)
 
+    # Resolve cache value: Ultralytics accepts True, "ram", "disk", or False.
+    _cache_str = args.cache.strip().lower()
+    if _cache_str in ("true", "ram"):
+        cache_value: bool | str = "ram"
+    elif _cache_str == "disk":
+        cache_value = "disk"
+    else:
+        cache_value = False
+
     train_kwargs: dict = dict(
         data=args.data,
         epochs=args.epochs,
@@ -180,7 +196,7 @@ def main() -> int:
         project=args.project,
         name=args.name,
         resume=args.resume,
-        cache=args.cache,
+        cache=cache_value,
         pretrained=True,
         patience=25,
         amp=True,
@@ -202,7 +218,7 @@ def main() -> int:
         copy_paste=0.0,
     )
 
-    print(f"[INFO] cls={args.cls} | cls_pw={args.cls_pw} | overlap_mask={args.overlap_mask}")
+    print(f"[INFO] cls={args.cls} | cls_pw={args.cls_pw} | overlap_mask={args.overlap_mask} | cache={cache_value}")
     model.train(**train_kwargs)
     return 0
 
