@@ -305,7 +305,9 @@ def _worker_main(spec: dict[str, Any]) -> int:
     cfg.enable_annotation_iou_check = True
     cfg.annotation_iou_xml_path = spec.get("xml_path") or spec.get("annotation_path")
     cfg.annotation_iou_output_dir = trial_dir / "annotation_iou"
-    cfg.overwrite_pipeline_cache = True
+    # Do NOT hardcode overwrite_pipeline_cache=True here — that would force SAM
+    # to recompute on every trial and defeat the shared SAM cache entirely.
+    # The value comes from the spec overrides (driven by OVERWRITE_PIPELINE_CACHE env var).
     cfg.annotation_iou_class_mode = spec.get("annotation_iou_class_mode", "grouped")
 
     prompts_module.AVAILABLE_PROMPTS = _deep_copy_prompt_map(prompts_module)
@@ -339,6 +341,12 @@ def _worker_main(spec: dict[str, Any]) -> int:
     cfg.annotation_iou_xml_path = spec.get("xml_path") or spec.get("annotation_path")
     cfg.annotation_iou_output_dir = trial_dir / "annotation_iou"
     cfg.results_dir = trial_dir / "results"
+
+    print(
+        f"[WORKER] cache settings: enable_pipeline_caching={getattr(cfg, 'enable_pipeline_caching', None)} | "
+        f"overwrite_pipeline_cache={getattr(cfg, 'overwrite_pipeline_cache', None)} | "
+        f"skip_mask_caching={getattr(cfg, 'skip_mask_caching', None)}"
+    )
 
     # Ensure pipeline cache root is honored inside worker processes. If the
     # driver/exporter set `PIPELINE_CACHE_ROOT` we propagate it into the
