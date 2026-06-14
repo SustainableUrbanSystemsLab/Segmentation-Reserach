@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -213,9 +214,13 @@ def compare_annotation_iou(
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         output_path = out_dir / f"{Path(cleaned['image_name']).stem}_iou_report.json"
-        np.save(out_dir / f"{Path(cleaned['image_name']).stem}_ground_truth_class_map.npy", gt_class_map)
-        np.save(out_dir / f"{Path(cleaned['image_name']).stem}_prediction_class_map.npy", pred_class_map)
-        np.save(out_dir / f"{Path(cleaned['image_name']).stem}_valid_mask.npy", valid_mask)
+        # Only save the large .npy arrays when explicitly requested — during
+        # calibration sweeps these are never read back and waste significant disk space.
+        save_npy = bool(os.environ.get("SAVE_ION_NPY_ARRAYS", "").strip().lower() in {"1", "true", "yes"})
+        if save_npy:
+            np.save(out_dir / f"{Path(cleaned['image_name']).stem}_ground_truth_class_map.npy", gt_class_map)
+            np.save(out_dir / f"{Path(cleaned['image_name']).stem}_prediction_class_map.npy", pred_class_map)
+            np.save(out_dir / f"{Path(cleaned['image_name']).stem}_valid_mask.npy", valid_mask)
 
         serializable_report = {
             key: value

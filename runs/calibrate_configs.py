@@ -279,7 +279,17 @@ class _FilteredOutput:
     @staticmethod
     def _should_forward(line: str) -> bool:
         return bool(
-            re.search(r"Saved figure: .*combined_masks|Saved annotation comparison figure|IoU report saved to:", line)
+            re.search(
+                r"Saved figure: .*combined_masks"
+                r"|Saved annotation comparison figure"
+                r"|IoU report saved to:"
+                r"|CACHE HIT"
+                r"|CACHE MISS"
+                r"|CACHE SAVE"
+                r"|cache settings:"
+                r"|\[WORKER\] Using PIPELINE_CACHE_ROOT",
+                line,
+            )
         )
 
 
@@ -369,6 +379,15 @@ def _worker_main(spec: dict[str, Any]) -> int:
         print(f"[WORKER] trial={trial_name} | entering get_satellite.py")
         runpy.run_path(str(RUNS_DIR / "get_satellite.py"), run_name="__main__")
         print(f"[WORKER] trial={trial_name} | get_satellite.py returned")
+
+    # Release GPU memory before this worker exits so the next tile starts clean.
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:
+        pass
 
     combined_mask_outputs = sorted((trial_dir / "results" / "combined_masks").glob("*.png"))
     if combined_mask_outputs:

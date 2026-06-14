@@ -1,0 +1,33 @@
+{
+  "_comment": "Default training configuration for the DeepLabV3+ wind comfort segmentation pipeline.",
+  "_comment_dataset": "Points to the pre-sliced dataset (1280x1280 chips). Run dataset_converter.py first: python deeplabv3_pipeline/dataset_converter.py --config deeplabv3_pipeline/dataset_config.json",
+
+  "data_dir": "data/deeplabv3_windcomfort_rgb_sliced",
+  "backbone": "resnet101",
+  "pretrained": true,
+  "epochs": 50,
+  "batch": 16,
+  "imgsz": 512,
+  "device": "0",
+  "name": "wind_comfort_deeplabv3",
+  "resume": false,
+  "cache": false,
+  "workers": 4,
+  "amp": true,
+  "lr0": 0.0001,
+  "warmup_epochs": 5,
+  "cos_lr": true,
+  "weight_decay": 0.0005,
+  "auto_class_weights": true,
+  "hsv_s": 0.4,
+  "hsv_v": 0.3,
+  "dropout": 0.3,
+  "patience": 30,
+  "min_weight": 0.1,
+  "max_weight": 5.0,
+  "log_class_iou_every": 10,
+  "manual_class_weights": {
+  "NEN_B": 2.0,
+  "Uncomfortable": 2.5
+  }
+}

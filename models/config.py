@@ -50,6 +50,7 @@ large_image_tile_overlap_px = 384
 enable_pipeline_caching = True  # Set to True to cache DINO/SAM intermediate results between runs
 overwrite_pipeline_cache = True  # Force recomputation after prompt changes so the cache is refreshed
 skip_mask_caching = True  # Skip writing intermediate mask caches during calibration runs
+skip_region_context_caching = False  # When True, skip writing region-context scoring caches (useful during calibration where weights change every trial)
 skip_if_visualizations_exist = True  # Reuse existing visualization outputs when present
 save_input_images = False  # Disable input image exports during calibration runs
 

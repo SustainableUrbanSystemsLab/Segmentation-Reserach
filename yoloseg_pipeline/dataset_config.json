@@ -8,8 +8,8 @@
   "seed": 42,
   "overwrite": true,
   "skip_empty_label_tiles": true,
-  "tile_size": 1280,
-  "tile_overlap": 128,
+  "tile_size": 2560,
+  "tile_overlap": 256,
 
   "train_tiles": [
     "tile_000_000",
@@ -21,10 +21,12 @@
     "tile_002_005",
     "tile_002_006",
     "tile_003_000",
-    "tile_003_003"
+    "tile_003_003",
+    "tile_003_001"
   ],
   "val_tiles": [
     "tile_002_003",
-    "tile_002_004"
+    "tile_002_004",
+    "tile_003_002"
   ]
 }

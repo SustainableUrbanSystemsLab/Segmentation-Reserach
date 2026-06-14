@@ -206,10 +206,11 @@ def _run_worker(trial_name: str, tif_file: str, output_dir: Path, weights: dict[
             "pixel_assignment_mode": "region_context",
             "build_prompt_strength_heatmaps": True,
             "coarse_to_fine_cell_px": 0,
-            "sam_auto_max_total_masks": 5000,
+            "sam_auto_max_total_masks": _env_int("SAM_AUTO_MAX_TOTAL_MASKS", 5000),
             "enable_pipeline_caching": True,
             "overwrite_pipeline_cache": OVERWRITE_PIPELINE_CACHE,
             "skip_mask_caching": _env_bool("SKIP_MASK_CACHING", True),
+            "skip_region_context_caching": True,  # Scoring caches are never reused (weights change every trial)
             "skip_if_visualizations_exist": _env_bool("SKIP_IF_VISUALIZATIONS_EXIST", True),
             "save_input_images": _env_bool("SAVE_INPUT_IMAGES", False),
             "sam_device": requested_device,

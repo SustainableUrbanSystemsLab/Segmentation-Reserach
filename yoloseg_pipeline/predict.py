@@ -87,7 +87,6 @@ def _tile_ranges(length: int, tile_size: int, overlap: int) -> list[tuple[int, i
 def _effective_tile_size(tile_size: int, imgsz: int) -> int:
     return max(1, min(int(tile_size), int(imgsz)))
 
-
 def _predict_tiled(
     model: YOLO,
     rgb: np.ndarray,
@@ -98,19 +97,33 @@ def _predict_tiled(
     fallback_conf: float,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
     height, width = rgb.shape[:2]
-    class_masks = {name: np.zeros((height, width), dtype=bool) for name in CLASS_NAMES}
-    best_conf = np.zeros((height, width), dtype=np.float32)
-    class_map = np.zeros((height, width), dtype=np.uint8)
+    num_classes = len(CLASS_NAMES)
+
+    # 1. Initialize continuous accumulation canvases
+    canvas_probs = np.zeros((num_classes, height, width), dtype=np.float32)
+    weight_map = np.zeros((height, width), dtype=np.float32)
+
+    # 2. Build a base 2D linear blending window matching your effective tile size
+    ramp_y = np.minimum(np.arange(tile_size), np.arange(tile_size)[::-1])
+    ramp_x = np.minimum(np.arange(tile_size), np.arange(tile_size)[::-1])
+    if np.max(ramp_y) > 0: ramp_y = ramp_y / np.max(ramp_y)
+    if np.max(ramp_x) > 0: ramp_x = ramp_x / np.max(ramp_x)
+    base_window = np.outer(ramp_y, ramp_x)
+    
+    # Apply a tiny baseline floor value (0.01) to prevent absolute zero edge lockups
+    base_window = np.maximum(base_window, 0.01)
 
     y_ranges = _tile_ranges(height, tile_size, overlap)
     x_ranges = _tile_ranges(width, tile_size, overlap)
 
+    # 3. Slide windows across the map matrix
     for y0, y1 in y_ranges:
         for x0, x1 in x_ranges:
             chip = rgb[y0:y1, x0:x1]
             if chip.size == 0:
                 continue
 
+            # Run YOLO prediction pass
             result = model.predict(chip, imgsz=imgsz, conf=conf, verbose=False, retina_masks=True)[0]
             if (result.masks is None or result.boxes is None or len(result.boxes) == 0) and fallback_conf >= 0.0:
                 result = model.predict(chip, imgsz=imgsz, conf=min(conf, fallback_conf), verbose=False, retina_masks=True)[0]
@@ -118,23 +131,47 @@ def _predict_tiled(
             if result.masks is None or result.boxes is None or len(result.boxes) == 0:
                 continue
 
-            masks = result.masks.data.cpu().numpy() > 0.5
+            # Handle edge chips that might be cut smaller than the target tile_size
+            ch, cw = y1 - y0, x1 - x0
+            window_mask = base_window[:ch, :cw]
+
+            # Grab soft continuous mask probabilities directly from YOLO tensor outputs
+            masks = result.masks.data.cpu().numpy()
             classes = result.boxes.cls.cpu().numpy().astype(int)
             scores = result.boxes.conf.cpu().numpy().astype(float)
 
-            local_best = best_conf[y0:y1, x0:x1]
-            local_map = class_map[y0:y1, x0:x1]
-
+            # 4. Sum up soft mask assignments weighted by window masks
             for mask, class_index, score in zip(masks, classes, scores):
-                if class_index < 0 or class_index >= len(CLASS_NAMES):
+                if class_index < 0 or class_index >= num_classes:
                     continue
-                update = mask & (score > local_best)
-                if not np.any(update):
-                    continue
-                local_best[update] = float(score)
-                local_map[update] = int(class_index + 1)
-                class_view = class_masks[CLASS_NAMES[class_index]][y0:y1, x0:x1]
-                class_view[update] = True
+                
+                # Multiply mask weights by structural coordinates bounding confidence
+                weighted_mask = mask * score * window_mask
+                canvas_probs[class_index, y0:y1, x0:x1] += weighted_mask
+            
+            # Accumulate processing window configuration footprints
+            weight_map[y0:y1, x0:x1] += window_mask
+
+    # 5. Normalize accumulated probabilities across overlapping passes
+    safe_weight = np.where(weight_map == 0, 1e-6, weight_map)
+    for c in range(num_classes):
+        canvas_probs[c] /= safe_weight
+
+    # 6. Reconstruct the precise downstream return variables expected by predict.py
+    max_probs = np.max(canvas_probs, axis=0)
+    class_map = np.argmax(canvas_probs, axis=0) + 1  # 1-indexed to match your convention
+
+    # Isolate unpredicted or low-probability background regions
+    background_mask = (weight_map == 0) | (max_probs == 0)
+    class_map[background_mask] = 0
+
+    best_conf = max_probs
+    best_conf[background_mask] = 0.0
+
+    class_masks = {
+        name: (class_map == (idx + 1)) 
+        for idx, name in enumerate(CLASS_NAMES)
+    }
 
     return class_masks, class_map, best_conf
 

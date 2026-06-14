@@ -206,111 +206,154 @@ def _tile_ranges(length: int, tile_size: int, overlap: int) -> list[tuple[int, i
     return ranges
 
 
+import os
+import numpy as np
+from shapely.geometry import box, Polygon, MultiPolygon, GeometryCollection
+from shapely.affinity import translate
+
+def process_and_clip_polygon(
+    global_polygon: Polygon, 
+    chip_bounds: tuple, 
+    chip_width: int = 640, 
+    chip_height: int = 640, 
+    normalize: bool = True
+):
+    """
+    Helper function: Clips a single global-space polygon to a specific chip window,
+    resolves topology anomalies, and maps coordinates to local chip space.
+    """
+    min_x, min_y, max_x, max_y = chip_bounds
+    chip_box = box(min_x, min_y, max_x, max_y)
+    
+    if not global_polygon.intersects(chip_box):
+        return []
+        
+    try:
+        clipped_geometry = global_polygon.intersection(chip_box)
+    except Exception as e:
+        return []
+
+    if clipped_geometry.is_empty:
+        return []
+
+    valid_polygons = []
+    if isinstance(clipped_geometry, Polygon):
+        valid_polygons.append(clipped_geometry)
+    elif isinstance(clipped_geometry, MultiPolygon):
+        valid_polygons.extend(list(clipped_geometry.geoms))
+    elif isinstance(clipped_geometry, GeometryCollection):
+        for geom in clipped_geometry.geoms:
+            if isinstance(geom, Polygon):
+                valid_polygons.append(geom)
+
+    local_chip_labels = []
+
+    for poly in valid_polygons:
+        if poly.area < 1.0: # Filter out sub-pixel noise
+            continue
+            
+        # Shift global coordinates to local chip space relative to top-left (min_x, min_y)
+        local_poly = translate(poly, xoff=-min_x, yoff=-min_y)
+        local_coords = np.array(local_poly.exterior.coords)
+        
+        # Drop duplicate closing vertex for line string conversion 
+        if len(local_coords) > 1 and np.array_equal(local_coords[0], local_coords[-1]):
+            local_coords = local_coords[:-1]
+
+        if normalize:
+            local_coords[:, 0] /= chip_width
+            local_coords[:, 1] /= chip_height
+            local_coords = np.clip(local_coords, 0.0, 1.0)
+            
+        local_chip_labels.append(local_coords.tolist())
+
+    return local_chip_labels
+
+
 def _slice_tile(
-    pair: TilePair,
-    output_dir: Path,
-    split: str,
-    tile_size: int,
-    overlap: int,
-    skip_empty_label_tiles: bool,
-) -> list[dict[str, object]]:
-    records = []
-    rgb = load_rgb_from_tif(pair.image_path)
-    height, width = rgb.shape[:2]
-    full_polygons = annotation_shapes_to_pixel_polygons(pair.annotation_path)
+    tile_image: np.ndarray, 
+    tile_name: str, 
+    global_annotations: list, 
+    output_dir: str, 
+    chip_size: int = 640, 
+    stride: int = 640
+):
+    """
+    Orchestrates the sliding window processing across a large image tile.
+    Extracts image chips and matches them with properly clipped local labels.
+    
+    Parameters:
+    -----------
+    tile_image : np.ndarray
+        The large source image array (e.g., loaded from a large .tif).
+    tile_name : str
+        Base string name of the tile used to name output chips.
+    global_annotations : list of dicts
+        List of all ground-truth targets on this tile: 
+        [{'class_id': int, 'polygon': shapely.geometry.Polygon}, ...]
+    output_dir : str
+        Directory where 'images' and 'labels' folders will be populated.
+    """
+    img_h, img_w = tile_image.shape[:2]
+    
+    images_out = os.path.join(output_dir, "images")
+    labels_out = os.path.join(output_dir, "labels")
+    os.makedirs(images_out, exist_ok=True)
+    os.makedirs(labels_out, exist_ok=True)
+    
+    chip_count = 0
 
-    y_ranges = _tile_ranges(height, tile_size, overlap)
-    x_ranges = _tile_ranges(width, tile_size, overlap)
-
-    for y0, y1 in y_ranges:
-        for x0, x1 in x_ranges:
-            chip_rgb = rgb[y0:y1, x0:x1]
-            if chip_rgb.size == 0:
+    # Slide window horizontally and vertically across the large tile
+    for y in range(0, img_h - chip_size + 1, stride):
+        for x in range(0, img_w - chip_size + 1, stride):
+            
+            # Define global pixel space boundaries for the current chip window
+            min_x, min_y = x, y
+            max_x, max_y = x + chip_size, y + chip_size
+            chip_bounds = (min_x, min_y, max_x, max_y)
+            
+            chip_labels_payload = []
+            
+            # Check all global annotations against this specific window
+            for ann in global_annotations:
+                class_id = ann['class_id']
+                global_poly = ann['polygon']
+                
+                # Get clean, scaled, normalized local shapes
+                local_polys = process_and_clip_polygon(
+                    global_polygon=global_poly,
+                    chip_bounds=chip_bounds,
+                    chip_width=chip_size,
+                    chip_height=chip_size,
+                    normalize=True # Set to True for standard YOLO segmentation
+                )
+                
+                # Append each valid segment component found within the boundaries
+                for poly_coords in local_polys:
+                    # Flatten out coordinate pairs to string tokens: class_id x1 y1 x2 y2 ...
+                    coord_str = " ".join([f"{coord:.6f}" for pair in poly_coords for coord in pair])
+                    chip_labels_payload.append(f"{class_id} {coord_str}")
+            
+            # Skip saving empty chips if you want to prevent background class dilution
+            if not chip_labels_payload:
                 continue
+                
+            # 1. Extract and save the corresponding image chip matrix
+            chip_matrix = tile_image[min_y:max_y, min_x:max_x]
+            chip_id = f"{tile_name}_chip_{chip_count}"
+            
+            # Using an arbitrary image write interface (adjust for cv2/PIL/tifffile as needed)
+            # e.g., cv2.imwrite(os.path.join(images_out, f"{chip_id}.jpg"), chip_matrix)
+            np.save(os.path.join(images_out, f"{chip_id}.npy"), chip_matrix) # Placeholder save method
+            
+            # 2. Write out the clean YOLO text label file
+            label_file_path = os.path.join(labels_out, f"{chip_id}.txt")
+            with open(label_file_path, "w") as f:
+                f.write("\n".join(chip_labels_payload) + "\n")
+                
+            chip_count += 1
 
-            chip_stem = f"{pair.stem}_crop_{y0}_{x0}"
-            image_out = output_dir / "images" / split / f"{chip_stem}.png"
-            label_out = output_dir / "labels" / split / f"{chip_stem}.txt"
-
-            chip_segments: list[tuple[int, list[float]]] = []
-            class_counts = {name: 0 for name in CLASS_NAMES}
-            class_area_px2 = {name: 0.0 for name in CLASS_NAMES}
-
-            for class_index, points in full_polygons:
-                xs = [p[0] for p in points]
-                ys = [p[1] for p in points]
-                min_x, max_x = min(xs), max(xs)
-                min_y, max_y = min(ys), max(ys)
-
-                if max_x < x0 or min_x > x1 or max_y < y0 or min_y > y1:
-                    continue
-
-                local_points: list[tuple[float, float]] = []
-                for x, y in points:
-                    cx = min(max(x, float(x0)), float(x1))
-                    cy = min(max(y, float(y0)), float(y1))
-                    lx = cx - float(x0)
-                    ly = cy - float(y0)
-                    local_points.append((lx, ly))
-
-                unique_points: list[tuple[float, float]] = []
-                for lp in local_points:
-                    if not unique_points or lp != unique_points[-1]:
-                        unique_points.append(lp)
-                if len(unique_points) > 1 and unique_points[0] == unique_points[-1]:
-                    unique_points.pop()
-
-                if len(unique_points) < 3:
-                    continue
-
-                area = 0.0
-                for i in range(len(unique_points)):
-                    x_i, y_i = unique_points[i]
-                    x_next, y_next = unique_points[(i + 1) % len(unique_points)]
-                    area += x_i * y_next - x_next * y_i
-                area = abs(area) * 0.5
-
-                if area < 10.0:
-                    continue
-
-                chip_w = float(x1 - x0)
-                chip_h = float(y1 - y0)
-                normalized_points: list[float] = []
-                for lx, ly in unique_points:
-                    normalized_points.extend([lx / chip_w, ly / chip_h])
-
-                if len(normalized_points) >= 6:
-                    chip_segments.append((class_index, normalized_points))
-                    class_name = CLASS_NAMES[class_index]
-                    class_counts[class_name] += 1
-                    class_area_px2[class_name] += area
-
-            if skip_empty_label_tiles and not chip_segments:
-                continue
-
-            save_rgb_png(chip_rgb, image_out)
-
-            label_out.parent.mkdir(parents=True, exist_ok=True)
-            lines = []
-            for class_index, pts in chip_segments:
-                point_text = " ".join(f"{v:.6f}" for v in pts)
-                lines.append(f"{class_index} {point_text}")
-            label_out.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-
-            records.append({
-                "stem": chip_stem,
-                "split": split,
-                "image_path": str(image_out),
-                "label_path": str(label_out),
-                "annotation_path": str(pair.annotation_path),
-                "image_source_path": str(pair.image_path),
-                "label_count": len(chip_segments),
-                "class_counts": class_counts,
-                "class_area_px2": class_area_px2,
-                "image_shape": [int(chip_rgb.shape[0]), int(chip_rgb.shape[1])],
-            })
-
-    return records
+    print(f"Successfully sliced {tile_name} into {chip_count} valid annotated chips.")
 
 
 def convert_dataset(

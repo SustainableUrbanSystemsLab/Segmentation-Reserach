@@ -2,23 +2,26 @@
   "_comment": "Default training configuration for the YOLOv11 wind comfort segmentation pipeline.",
   "_comment_dataset": "Points to the pre-sliced dataset (1280x1280 chips). Run dataset_converter.py first: python yoloseg_pipeline/dataset_converter.py --config yoloseg_pipeline/dataset_config.json",
   "_comment_cache": "cache=true loads all chips into RAM once at the start of training. With 1280px chips (~300-500 images) this is feasible and eliminates repeated disk I/O.",
-  "_comment_cls_pw": "cls_pw=1.0 applies automatic inverse-frequency class weighting to help NEN_C and Uncomfortable which are chronically under-predicted.",
 
   "data": "data/yoloseg_windcomfort_rgb_sliced/dataset.yaml",
-  "model": "yolo11n-seg.pt",
+  "model": "yolo11l-seg.pt",
   "epochs": 100,
-  "batch": 8,
-  "imgsz": 1280,
+  "batch": 2,
+  "verbose": true,
+  "imgsz": 2560,
   "device": "0",
-  "project": "results/yoloseg",
   "name": "wind_comfort_seg",
   "resume": false,
-  "cache": true,
-
+  "cache": false,
+  "workers": 4,
   "cls": 1.0,
-  "cls_pw": 1.0,
   "overlap_mask": true,
-
-  "allow_large_images": true,
-  "clear_label_cache": true
+  "amp": true,
+  "lr0": 0.0005,
+  "warmup_epochs": 10,
+  "cos_lr": true,
+  "weight_decay": 0.0005,
+  "hsv_s": 0.4,
+  "hsv_v": 0.3,
+  "copy_paste": 0.0
 }

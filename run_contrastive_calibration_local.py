@@ -143,7 +143,7 @@ def main() -> int:
     env_overrides: dict[str, str] = {
         # GPU
         "CUDA_VISIBLE_DEVICES": "0",
-        "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:256",
+        "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:128",  # Smaller splits for 12GB VRAM
         "PYTHONUNBUFFERED": "1",
         # CUDA required (change to 0 if you want CPU fallback)
         "REQUIRE_CUDA": "1",
@@ -154,6 +154,8 @@ def main() -> int:
         "PIPELINE_CACHE_ROOT": str(args.cache_root),
         "OVERWRITE_PIPELINE_CACHE": "1" if args.overwrite_pipeline_cache else "0",
         "SKIP_MASK_CACHING": "0",          # Store full SAM arrays for cross-trial reuse
+        # SAM VRAM cap — 3080 Ti has 12GB; 2500 masks is safe, 5000 risks OOM on large tiles
+        "SAM_AUTO_MAX_TOTAL_MASKS": "2500",
         # Calibration
         "CALIBRATION_CACHE_KEY": args.cache_key,
         "CALIBRATION_OUTPUT_DIR": str(args.output_dir / args.cache_key),

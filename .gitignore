@@ -11,3 +11,5 @@ planet.local.json
 /data/yoloseg_windcomfort_rgb/images
 /data/yoloseg_windcomfort_rgb
 *.pyc
+/data
+/runs/segment/results

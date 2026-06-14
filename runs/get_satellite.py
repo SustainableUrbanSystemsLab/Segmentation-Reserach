@@ -537,6 +537,11 @@ def save_region_context_scoring_cache(
         return False
     if not region_context_masks:
         return False
+    # During calibration sweeps every trial has different contrastive weights,
+    # which produces a unique scope hash → the scoring cache is never re-read.
+    # Skip writing these multi-GB files to avoid wasting hundreds of GB.
+    if bool(getattr(cfg, "skip_region_context_caching", False)):
+        return False
 
     # Avoid caching full segmentation arrays for region-context scoring. Instead
     # write a tiny metadata file so we can detect that scoring ran without

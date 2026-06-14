@@ -4,20 +4,22 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
 from ultralytics import YOLO
 
+# --------------------------------------------------
+# Environment Setup
+# --------------------------------------------------
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from yoloseg_pipeline.common import PROJECT_ROOT
-
-# Default config file — lives next to this script.
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "train_config.json"
 
 
 def _default_workers() -> int:
@@ -27,104 +29,49 @@ def _default_workers() -> int:
     return max(1, os.cpu_count() or 1)
 
 
-def _load_config(config_path: Path) -> dict:
-    """Load JSON config, stripping keys that start with '_' (comments)."""
-    if not config_path.exists():
-        print(f"[WARN] Config file not found: {config_path}. Using built-in defaults.")
-        return {}
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-        cleaned = {k: v for k, v in raw.items() if not k.startswith("_")}
-        print(f"[INFO] Loaded training config: {config_path}")
-        return cleaned
-    except Exception as exc:
-        print(f"[WARN] Could not parse config file {config_path}: {exc}. Using built-in defaults.")
-        return {}
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
 
-
-def _resolve_path(value: str) -> str:
-    """Resolve a config path relative to PROJECT_ROOT if it is not absolute."""
-    p = Path(value)
-    if not p.is_absolute():
-        p = PROJECT_ROOT / p
-    return str(p)
-
-
-def _parse_args(config: dict) -> argparse.Namespace:
-    # Pull config values (falling back to hard-coded defaults) so the config
-    # file acts as the default layer and CLI flags always win.
-    parser = argparse.ArgumentParser(
-        description="Train a YOLOv11 segmentation model on the wind comfort dataset.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "--config",
-        default=str(DEFAULT_CONFIG_PATH),
-        help="Path to JSON training config file.",
-    )
     parser.add_argument(
         "--data",
-        default=_resolve_path(config.get("data", "data/yoloseg_windcomfort_rgb/dataset.yaml")),
-    )
-    parser.add_argument(
-        "--model",
-        default=config.get("model", "yolo11n-seg.pt"),
-        help="Starting checkpoint or model name.",
-    )
-    parser.add_argument("--epochs", type=int, default=config.get("epochs", 100))
-    parser.add_argument("--batch", type=int, default=config.get("batch", 8))
-    parser.add_argument("--imgsz", type=int, default=config.get("imgsz", 1280))
-    parser.add_argument("--device", default=str(config.get("device", "0")))
-    parser.add_argument("--workers", type=int, default=config.get("workers", _default_workers()))
-    parser.add_argument(
-        "--project",
-        default=_resolve_path(config.get("project", "results/yoloseg")),
-    )
-    parser.add_argument("--name", default=config.get("name", "wind_comfort_seg"))
-    parser.add_argument("--resume", action="store_true", default=config.get("resume", False))
-    parser.add_argument(
-        "--cache",
-        type=str,
-        default=str(config.get("cache", "false")).lower(),
-        help="Image caching: 'false' (off), 'true'/'ram' (cache in RAM), 'disk' (cache on disk). "
-             "RAM caching eliminates per-epoch disk I/O once chips are pre-loaded. "
-             "Safe to use when the sliced chip dataset fits in memory.",
+        default=str(
+            PROJECT_ROOT / "data" / "yoloseg_windcomfort_rgb_sliced" / "dataset.yaml"
+        ),
     )
 
-    # --- Class imbalance controls ---
-    parser.add_argument(
-        "--cls",
-        type=float,
-        default=config.get("cls", 0.5),
-        help="Classification loss weight. Raise to ~1.0–2.0 to boost rare-class sensitivity.",
-    )
-    parser.add_argument(
-        "--cls-pw",
-        type=float,
-        default=config.get("cls_pw", 0.0),
-        help="Class weights power for handling class imbalance. "
-             "0.0=disabled (uniform), 1.0=full inverse-frequency weighting. "
-             "Use 1.0 to automatically upweight NEN_C and Uncomfortable.",
-    )
-    parser.add_argument(
-        "--overlap-mask",
-        action=argparse.BooleanOptionalAction,
-        default=config.get("overlap_mask", True),
-        help="Allow overlapping masks. Set --no-overlap-mask for small adjacent classes.",
-    )
+    parser.add_argument("--model", default="yolo11l-seg.pt")
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--imgsz", type=int, default=1280)
+    parser.add_argument("--device", default="0")
+    parser.add_argument("--workers", type=int, default=_default_workers())
+
+    parser.add_argument("--name", default="wind_comfort_seg")
+
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--cache", action="store_true")
+
     parser.add_argument(
         "--allow-large-images",
         action=argparse.BooleanOptionalAction,
-        default=config.get("allow_large_images", True),
-        help="Disable Pillow decompression-bomb checks for trusted local training datasets.",
+        default=True,
     )
+
     parser.add_argument(
         "--clear-label-cache",
         action=argparse.BooleanOptionalAction,
-        default=config.get("clear_label_cache", True),
-        help="Delete labels/*.cache files before training to avoid stale corrupt-image cache state.",
+        default=True,
     )
+
     return parser.parse_args()
+
+
+def _preflight_dependencies() -> None:
+    if importlib.util.find_spec("pi_heif") is None:
+        print(
+            "[WARN] Missing optional dependency pi-heif. "
+            "Install with: pip install pi-heif"
+        )
 
 
 def _delete_label_caches(dataset_yaml: Path) -> None:
@@ -132,9 +79,12 @@ def _delete_label_caches(dataset_yaml: Path) -> None:
         return
 
     yaml_lines = dataset_yaml.read_text(encoding="utf-8").splitlines()
-    base_path: Path | None = None
+
+    base_path = None
+
     for line in yaml_lines:
         stripped = line.strip()
+
         if stripped.startswith("path:"):
             base_path = Path(stripped.split(":", 1)[1].strip())
             break
@@ -143,6 +93,7 @@ def _delete_label_caches(dataset_yaml: Path) -> None:
         base_path = dataset_yaml.parent
 
     labels_dir = base_path / "labels"
+
     if not labels_dir.exists():
         return
 
@@ -150,78 +101,167 @@ def _delete_label_caches(dataset_yaml: Path) -> None:
         cache_file.unlink(missing_ok=True)
 
 
-def _preflight_dependencies() -> None:
-    if importlib.util.find_spec("pi_heif") is None:
-        print("[WARN] Missing optional dependency 'pi-heif'. Install once with: pip install pi-heif")
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
 
-
-def main() -> int:
-    # Two-pass approach: load config file first, then parse CLI (CLI always wins).
-    # We do a lightweight pre-parse just to find --config before the real parse.
-    pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    pre_args, _ = pre_parser.parse_known_args()
-
-    config = _load_config(Path(pre_args.config))
-    args = _parse_args(config)
+def main(config_path="yoloseg_pipeline/train_config.json"):
 
     _preflight_dependencies()
-    print(f"[INFO] Resolved training workers: {args.workers}")
 
-    if args.allow_large_images:
+    args = _parse_args()
+    run_args = vars(args)
+
+    config_file = Path(config_path)
+
+    if config_file.exists():
+        print(f"--> Loading config: {config_file}")
+
+        with open(config_file, "r") as f:
+            config_data = json.load(f)
+
+        run_args.update(config_data)
+
+    # ----------------------------------------------
+    # Large image support
+    # ----------------------------------------------
+
+    if run_args.get("allow_large_images", True):
+        print("--> Disabling Pillow decompression limits")
         Image.MAX_IMAGE_PIXELS = None
 
-    dataset_yaml = Path(args.data)
-    if args.clear_label_cache:
-        _delete_label_caches(dataset_yaml)
+    # ----------------------------------------------
+    # Optional cache cleanup
+    # ----------------------------------------------
 
-    model = YOLO(args.model)
+    if run_args.get("clear_label_cache", False):
+        print("--> Clearing label cache files")
+        _delete_label_caches(Path(run_args["data"]))
 
-    # Resolve cache value: Ultralytics accepts True, "ram", "disk", or False.
-    _cache_str = args.cache.strip().lower()
-    if _cache_str in ("true", "ram"):
-        cache_value: bool | str = "ram"
-    elif _cache_str == "disk":
-        cache_value = "disk"
-    else:
-        cache_value = False
+    # ----------------------------------------------
+    # Canonical directories
+    # ----------------------------------------------
 
-    train_kwargs: dict = dict(
-        data=args.data,
-        epochs=args.epochs,
-        batch=args.batch,
-        imgsz=args.imgsz,
-        device=args.device,
-        workers=args.workers,
-        project=args.project,
-        name=args.name,
-        resume=args.resume,
-        cache=cache_value,
-        pretrained=True,
-        patience=25,
-        amp=True,
-        cls=args.cls,
-        cls_pw=args.cls_pw,
-        overlap_mask=args.overlap_mask,
-        hsv_h=0.015,
-        hsv_s=0.7,
-        hsv_v=0.4,
-        degrees=180.0,
-        translate=0.08,
-        scale=0.5,
-        shear=0.0,
-        perspective=0.0,
-        flipud=0.5,
-        fliplr=0.5,
-        mosaic=0.8,
-        mixup=0.05,
-        copy_paste=0.0,
+    run_name = run_args.get("name", "wind_comfort_seg")
+    resume_requested = run_args.get("resume", False)
+
+    #
+    # SINGLE SOURCE OF TRUTH
+    #
+    project_dir = (PROJECT_ROOT / "results" / "yoloseg").resolve()
+
+    run_dir = project_dir / run_name
+
+    weights_dir = run_dir / "weights"
+
+    last_checkpoint = weights_dir / "last.pt"
+
+    archive_root = project_dir / "old_yoloseg_results"
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+    archive_root.mkdir(parents=True, exist_ok=True)
+
+    print("\n--> Canonical paths")
+    print(f"Project dir : {project_dir}")
+    print(f"Run dir     : {run_dir}")
+    print(f"Checkpoint  : {last_checkpoint}")
+    print(f"Exists      : {last_checkpoint.exists()}")
+
+    # ----------------------------------------------
+    # Resume handling
+    # ----------------------------------------------
+
+    model_weights = run_args.get("model", "yolo11l-seg.pt")
+
+    if resume_requested:
+
+        if last_checkpoint.exists():
+
+            print("\n--> [RESUME]")
+            print(f"Checkpoint found:")
+            print(f"    {last_checkpoint}")
+
+            model_weights = str(last_checkpoint)
+
+        else:
+
+            print("\n--> [WARN]")
+            print("Resume requested but checkpoint not found.")
+            print(f"Expected: {last_checkpoint}")
+
+            resume_requested = False
+            run_args["resume"] = False
+
+    # ----------------------------------------------
+    # Archive previous run
+    # ----------------------------------------------
+
+    if run_dir.exists() and not resume_requested:
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        archive_dir = archive_root / f"{run_name}_{timestamp}"
+
+        print("\n--> [ARCHIVE]")
+        print(f"FROM: {run_dir}")
+        print(f"TO  : {archive_dir}")
+
+        shutil.move(str(run_dir), str(archive_dir))
+
+    # ----------------------------------------------
+    # Build train args
+    # ----------------------------------------------
+
+    ignored_keys = {
+        "_comment",
+        "_comment_dataset",
+        "_comment_cache",
+        "project",                 # ignored on purpose
+        "allow_large_images",
+        "clear_label_cache",
+        "model",
+    }
+
+    clean_train_args = {
+        k: v
+        for k, v in run_args.items()
+        if not k.startswith("_")
+        and k not in ignored_keys
+    }
+
+    clean_train_args.update(
+        {
+            "project": str(project_dir),
+            "name": run_name,
+            "exist_ok": True,
+        }
     )
 
-    print(f"[INFO] cls={args.cls} | cls_pw={args.cls_pw} | overlap_mask={args.overlap_mask} | cache={cache_value}")
-    model.train(**train_kwargs)
-    return 0
+    print("\n--> Final YOLO args")
+    print(f"project = {clean_train_args['project']}")
+    print(f"name    = {clean_train_args['name']}")
+    print(f"resume  = {resume_requested}")
+
+    # ----------------------------------------------
+    # Train
+    # ----------------------------------------------
+
+    if resume_requested:
+
+        print("\n--> Launching resumed training")
+
+        model = YOLO(str(last_checkpoint))
+
+        model.train(resume=True)
+
+    else:
+
+        print("\n--> Launching fresh training")
+
+        model = YOLO(model_weights)
+
+        model.train(**clean_train_args)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

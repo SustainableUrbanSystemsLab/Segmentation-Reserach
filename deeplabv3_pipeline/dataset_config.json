@@ -1,0 +1,32 @@
+{
+  "_comment": "Run with: python deeplabv3_pipeline/dataset_converter.py --config deeplabv3_pipeline/dataset_config.json",
+  "_comment_tile_size": "tile_size=1280 pre-slices each 15k x 15k tile into 1280x1280 chips with 128px overlap. Masks are single-channel PNGs with pixel=class_id (0-4), 255=ignore.",
+
+  "source_dir": "Maps/Tiles/Atlanta_split_google",
+  "output_dir": "data/deeplabv3_windcomfort_rgb_sliced",
+  "val_ratio": 0.2,
+  "seed": 42,
+  "overwrite": true,
+  "skip_empty_label_tiles": true,
+  "tile_size": 1280,
+  "tile_overlap": 128,
+
+  "train_tiles": [
+    "tile_000_000",
+    "tile_000_001",
+    "tile_000_002",
+    "tile_002_000",
+    "tile_002_001",
+    "tile_002_002",
+    "tile_002_005",
+    "tile_002_006",
+    "tile_003_000",
+    "tile_003_003",
+    "tile_003_001"
+  ],
+  "val_tiles": [
+    "tile_002_003",
+    "tile_002_004",
+    "tile_003_002"
+  ]
+}
