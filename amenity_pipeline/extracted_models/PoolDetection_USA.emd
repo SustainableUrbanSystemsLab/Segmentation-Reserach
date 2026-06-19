@@ -1,0 +1,46 @@
+{
+    "Framework": "arcgis.learn.models._inferencing",
+    "ModelType": "ObjectDetection",
+    "InferenceFunction": "ArcGISObjectDetector.py",
+    "ModelConfiguration": "_model_extension_inferencing",
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "Classes": [
+        {
+            "Value": 1,
+            "Name": "swimming pool",
+            "Color": [
+                154,
+                1,
+                122
+            ]
+        }
+    ],
+    "ModelConfigurationFile": "ModelConfiguration.py",
+    "ModelFileConfigurationClass": "MyFasterRCNN",
+    "DatasetType": "PASCAL_VOC_rectangles",
+    "Kwargs": {},
+    "SupportsVariableTileSize": false,
+    "ArcGISLearnVersion": "2.1.1",
+    "ModelFile": "PoolDetection_USA.pth",
+    "ImageHeight": 224,
+    "ImageWidth": 224,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "5.2481e-05",
+    "ModelName": "FasterRCNN",
+    "backend": "pytorch",
+    "ModelParameters": {
+        "backbone": "resnet50",
+        "backend": "pytorch"
+    },
+    "average_precision_score": {
+        "Undefined": 0.5986291924508321
+    },
+    "resize_to": null,
+    "IsMultispectral": false,
+    "ModelFormat": "NCHW",
+    "Version": "2024.04.01"
+}

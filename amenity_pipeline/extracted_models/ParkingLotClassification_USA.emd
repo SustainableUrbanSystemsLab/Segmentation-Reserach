@@ -1,0 +1,69 @@
+{
+    "Framework": "arcgis.learn.models._inferencing",
+    "ModelType": "ImageClassification",
+    "InferenceFunction": "ArcGISImageClassifier.py",
+    "IsEdgeDetection": false,
+    "ModelConfiguration": "_model_extension_inferencing",
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "Classes": [
+        {
+            "Value": 1,
+            "Name": "1",
+            "Color": [
+                196,
+                116,
+                212
+            ]
+        }
+    ],
+    "ModelConfigurationFile": "ModelConfiguration.py",
+    "ModelFileConfigurationClass": "MMSegmentationConfig",
+    "DatasetType": "Classified_Tiles",
+    "Kwargs": {
+        "model": "deeplabv3plus",
+        "model_weight": false,
+        "ignore_class": [],
+        "class_weight": null,
+        "pretrained_backbone": false
+    },
+    "ModelFormat": "NCHW",
+    "MinCellSize": {
+        "x": 0.3,
+        "y": 0.3,
+        "spatialReference": {
+            "wkid": 102100,
+            "latestWkid": 3857
+        }
+    },
+    "MaxCellSize": {
+        "x": 0.3,
+        "y": 0.3,
+        "spatialReference": {
+            "wkid": 102100,
+            "latestWkid": 3857
+        }
+    },
+    "SupportsVariableTileSize": false,
+    "ArcGISLearnVersion": "2.1.0",
+    "monitored_valid_loss": 0.17844070494174957,
+    "ModelFile": "ParkingLotClassification_USA.pth",
+    "ImageHeight": 400,
+    "ImageWidth": 400,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "slice('7.5858e-06', '7.5858e-05', None)",
+    "ModelName": "MMSegmentation",
+    "backend": "pytorch",
+    "ModelParameters": {
+        "model_name": "deeplabv3plus",
+        "backend": "pytorch"
+    },
+    "accuracy": "9.2535e-01",
+    "resize_to": 400,
+    "IsMultispectral": false,
+    "per_class_metrics": "{\"NoData\":{\"precision\":0.9494917989,\"recall\":0.9646876454,\"f1\":0.9570294023},\"1\":{\"precision\":0.7556500435,\"recall\":0.6803104281,\"f1\":0.7160037756}}",
+    "Version": "2023.11.14"
+}

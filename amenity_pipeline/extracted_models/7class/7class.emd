@@ -1,0 +1,89 @@
+{
+    "Framework": "arcgis.learn.models._inferencing",
+    "ModelConfiguration": "_unet",
+    "ModelType": "ImageClassification",
+    "InferenceFunction": "ArcGISImageClassifier.py",
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "ignore_mapped_class": [],
+    "SupportsVariableTileSize": true,
+    "Classes": [
+        {
+            "Value": 1,
+            "Name": "Water",
+            "Color": [
+                0,
+                197,
+                255
+            ]
+        },
+        {
+            "Value": 2,
+            "Name": "Tree Canopy and Shrubs",
+            "Color": [
+                38,
+                115,
+                0
+            ]
+        },
+        {
+            "Value": 3,
+            "Name": "Low Vegetation",
+            "Color": [
+                163,
+                255,
+                115
+            ]
+        },
+        {
+            "Value": 4,
+            "Name": "Barren",
+            "Color": [
+                255,
+                170,
+                0
+            ]
+        },
+        {
+            "Value": 5,
+            "Name": "Impervious Surfaces",
+            "Color": [
+                156,
+                156,
+                156
+            ]
+        },
+        {
+            "Value": 6,
+            "Name": "Impervious Roads",
+            "Color": [
+                0,
+                0,
+                0
+            ]
+        }
+    ],
+    "ModelFormat": "NCHW",
+    "MinCellSize": null,
+    "MaxCellSize": null,
+    "ArcGISLearnVersion": "2.0.0",
+    "ModelFile": "7class.pth",
+    "ImageHeight": 512,
+    "ImageWidth": 512,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "1.0000e-04",
+    "ModelName": "UnetClassifier",
+    "backend": "pytorch",
+    "ModelParameters": {
+        "backbone": "resnet34",
+        "backend": "pytorch"
+    },
+    "accuracy": "8.7863e-01",
+    "resize_to": 512,
+    "IsMultispectral": false,
+    "per_class_metrics": "{\"NoData\":{\"precision\":0.0,\"recall\":0.0,\"f1\":0.0},\"Water\":{\"precision\":0.9484840035,\"recall\":0.9447984099,\"f1\":0.9466375709},\"Tree Canopy and Shrubs\":{\"precision\":0.9142236114,\"recall\":0.9182269573,\"f1\":0.9162209034},\"Low Vegetation\":{\"precision\":0.8521523476,\"recall\":0.847040534,\"f1\":0.8495887518},\"Barren\":{\"precision\":0.7880399823,\"recall\":0.6923689842,\"f1\":0.7371131182},\"Impervious Surfaces\":{\"precision\":0.8369213939,\"recall\":0.8410041332,\"f1\":0.838957727},\"Impervious Roads\":{\"precision\":0.8202033043,\"recall\":0.8295149207,\"f1\":0.8248327971}}",
+    "Version": "2023.10.09"
+}

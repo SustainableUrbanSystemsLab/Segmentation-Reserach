@@ -1,0 +1,466 @@
+
+import json
+import sys, os, importlib
+sys.path.append(os.path.dirname(__file__))
+
+import numpy as np
+import math
+import arcpy
+import cv2
+
+def check_centroid_in_center(centroid, start_x, start_y, chip_sz, padding):
+    return ((centroid[1] >= (start_y + padding)) and                  (centroid[1] <= (start_y + (chip_sz - padding))) and                 (centroid[0] >= (start_x + padding)) and                 (centroid[0] <= (start_x + (chip_sz - padding))))
+
+def find_i_j(centroid, n_rows, n_cols, chip_sz, padding, filter_detections):
+    for i in range(n_rows):
+        for j in range(n_cols):
+            start_x = i * chip_sz
+            start_y = j * chip_sz
+
+            if (centroid[1] > (start_y)) and (centroid[1] < (start_y + (chip_sz))) and (centroid[0] > (start_x)) and (centroid[0] < (start_x + (chip_sz))):
+                in_center = check_centroid_in_center(centroid, start_x, start_y, chip_sz, padding)
+                if filter_detections:
+                    if in_center: 
+                        return i, j, in_center
+                else:
+                    return i, j, in_center
+    return None
+
+
+def get_available_device(max_memory=0.8):
+    '''
+    select available device based on the memory utilization status of the device
+    :param max_memory: the maximum memory utilization ratio that is considered available
+    :return: GPU id that is available, -1 means no GPU is available/uses CPU, if GPUtil package is not installed, will
+    return 0 
+    '''
+    try:
+        import GPUtil
+    except ModuleNotFoundError:
+        return 0
+
+    GPUs = GPUtil.getGPUs()
+    freeMemory = 0
+    available = 0
+    for GPU in GPUs:
+        if GPU.memoryUtil > max_memory:
+            continue
+        if GPU.memoryFree >= freeMemory:
+            freeMemory = GPU.memoryFree
+            available = GPU.id
+
+    return available
+
+features = {
+    'displayFieldName': '',
+    'fieldAliases': {
+        'FID': 'FID',
+        'Class': 'Class',
+        'Confidence': 'Confidence'
+    },
+    'geometryType': 'esriGeometryPolygon',
+    'fields': [
+        {
+            'name': 'FID',
+            'type': 'esriFieldTypeOID',
+            'alias': 'FID'
+        },        
+        {
+            'name': 'Class',
+            'type': 'esriFieldTypeString',
+            'alias': 'Class'
+        },
+        {
+            'name': 'Confidence',
+            'type': 'esriFieldTypeDouble',
+            'alias': 'Confidence'
+        }
+    ],
+    'features': []
+}
+
+fields = {
+    'fields': [
+        {
+            'name': 'OID',
+            'type': 'esriFieldTypeOID',
+            'alias': 'OID'
+        },      
+        {
+            'name': 'Class',
+            'type': 'esriFieldTypeString',
+            'alias': 'Class'
+        },
+        {
+            'name': 'Confidence',
+            'type': 'esriFieldTypeDouble',
+            'alias': 'Confidence'
+        },
+        {
+            'name': 'Shape',
+            'type': 'esriFieldTypeGeometry',
+            'alias': 'Shape'
+        }
+    ]
+}
+
+class GeometryType:
+    Point = 1
+    Multipoint = 2
+    Polyline = 3
+    Polygon = 4
+
+class TreeDetector:
+    def __init__(self):
+        self.name = 'Object Detector'
+        self.description = 'This python raster function applies deep learning model to detect objects in imagery'
+
+    def initialize(self, **kwargs):
+        if 'model' not in kwargs:
+            return
+
+        model = kwargs['model']
+        model_as_file = True
+        try:
+            with open(model, 'r') as f:
+                self.json_info = json.load(f)
+        except FileNotFoundError:
+            try:
+                self.json_info = json.loads(model)
+                model_as_file = False
+            except json.decoder.JSONDecodeError:
+                raise Exception("Invalid model argument")
+
+        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+
+        from tree_detector_inference import ChildObjectDetector
+
+        sys.path.remove(os.path.dirname(os.path.abspath(__file__)))
+
+
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        device = None
+        device_id = None
+        if 'device' in kwargs:
+            device = kwargs['device']
+            if device == -2:
+                device = get_available_device()
+
+        if device is not None:
+            if device >= 0:
+                try:
+                    import torch
+                except Exception:
+                    raise Exception("PyTorch is not installed. Install it using conda install -c esri deep-learning-essentials")
+                torch.cuda.set_device(device)
+                arcpy.env.processorType = "GPU"
+                arcpy.env.gpuId = str(device)
+                device_id = device
+            else:
+                arcpy.env.processorType = "CPU"
+                device_id = "cpu"
+
+        self.child_object_detector = ChildObjectDetector()
+        self.child_object_detector.initialize(model, model_as_file)
+        
+        prf_root_dir = os.path.join(os.path.dirname(__file__), 'segment-anything')
+        if sys.path[0] != prf_root_dir:
+            sys.path.insert(0, prf_root_dir)
+        from segment_anything import sam_model_registry, SamPredictor
+        sam_checkpoint =  os.path.join(prf_root_dir, "models/sam_vit_b_01ec64.pth")#sam_vit_l_0b3195.pth"
+        model_type = "vit_b"
+        sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+        sam.to(device=device_id)
+        self.predictor = SamPredictor(sam)
+
+    def getParameterInfo(self):
+        required_parameters = [
+            {
+                'name': 'raster',
+                'dataType': 'raster',
+                'required': True,
+                'displayName': 'Raster',
+                'description': 'Input Raster'
+            },
+            {
+                'name': 'model',
+                'dataType': 'string',
+                'required': True,
+                'displayName': 'Input Model Definition (EMD) File',
+                'description': 'Input model definition (EMD) JSON file'
+            },
+            {
+                'name': 'device',
+                'dataType': 'numeric',
+                'required': False,
+                'displayName': 'Device ID',
+                'description': 'Device ID'
+            }
+        ]
+        parameter_info = self.child_object_detector.getParameterInfo(
+            required_parameters
+        )
+        parameter_info.extend(
+            [
+                {
+                    "name": "test_time_augmentation",
+                    "dataType": "string",
+                    "required": False,
+                    "value": "False"
+                    if "test_time_augmentation" not in self.json_info
+                    else str(self.json_info["test_time_augmentation"]),
+                    "displayName": "Perform test time augmentation while predicting",
+                    "description": "If True, will merge predictions from flipped and rotated images.",
+                },
+                {
+                    "name": "prompt_type",
+                    "dataType": "string",
+                    "required": True,
+                    "value": "box",
+                    "displayName": "prompt_type",
+                    "description": "box or center method for getting segmentation",
+                },
+            ]
+        )
+        return parameter_info
+
+    def getConfiguration(self, **scalars):
+        configuration = self.child_object_detector.getConfiguration(**scalars)
+        if 'DataRange' in self.json_info:
+            configuration['dataRange'] = tuple(self.json_info['DataRange'])
+        configuration['inheritProperties'] = 2|4|8
+        configuration['inputMask'] = True        
+        self.use_tta = scalars.get("test_time_augmentation", "false").lower() in [
+            "true",
+            "1",
+            "t",
+            "y",
+            "yes",
+        ]
+        self.use_center  = scalars.get("prompt_type","box").lower() in [
+            "center",
+        ]
+        self.nms_overlap = float(scalars.get("nms_overlap", 0.1))
+        return configuration
+
+    def getFields(self):
+        return json.dumps(fields)
+
+    def getGeometryType(self):
+        return GeometryType.Polygon
+
+    def vectorize(self, **pixelBlocks):
+        # set pixel values in invalid areas to 0
+        raster_mask = pixelBlocks["raster_mask"]
+        raster_pixels = pixelBlocks["raster_pixels"]
+        raster_pixels[np.where(raster_mask == 0)] = 0
+        pixelBlocks["raster_pixels"] = raster_pixels
+        
+        polygon_list, scores, classes = self.tta_detect_objects(**pixelBlocks)
+        
+        mask_list = []
+        score_list = []
+        class_list = []
+        if polygon_list:
+            for pidx,pgn in enumerate(polygon_list):
+                self.predictor.set_image(np.moveaxis(raster_pixels,0,-1))
+                pgn+=self.child_object_detector.padding
+                pa = int(pgn[0][1]),int(pgn[0][0])
+                pb = int(pgn[2][1]),int(pgn[2][0])
+                width = pb[0] - pa[0]
+                height = pb[1] - pa[1]
+                area_box = width*height
+                if self.use_center:
+                    center_x = int((pa[0] + pb[0]) / 2)
+                    center_y = int((pa[1] + pb[1]) / 2)
+                    masks, _, _ = self.predictor.predict(point_coords=np.array([[center_x,center_y]]),point_labels=np.array([1]),multimask_output=False)
+                else:
+                    sambox = pa+pb
+                    masks, _, _ = self.predictor.predict(box=np.array(sambox),multimask_output=False)
+                
+                masked_img = masks[0]*1
+                contours, hierarchy = cv2.findContours((masked_img).astype(np.uint8),
+                                                    cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE,
+                                                    offset=(0, 0))
+                contours = list(contours)
+                sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+                for cont in sorted_contours:
+                    cont_area = cv2.contourArea(cont)
+                    if cont_area > area_box*0.05: 
+                        cont_mask = np.moveaxis(cont,1,0)
+                        cont_mask[0][:, 0] = cont_mask[0][:, 0] -self.child_object_detector.padding
+                        cont_mask[0][:, 1] = cont_mask[0][:, 1] -self.child_object_detector.padding
+                        cont_mask_list = cont_mask.tolist()
+                        mask_list.append(cont_mask_list)
+                        score_list.append(scores[pidx])
+                        class_list.append(classes[pidx])
+                        
+                
+                
+        
+        features["features"] = []
+        for mask_idx, mask in enumerate(mask_list):
+            features['features'].append({
+                'attributes': {
+                    'OID': mask_idx + 1,
+                    'Class': self.json_info["Classes"][class_list[mask_idx] - 1]["Name"],
+                    'Confidence': score_list[mask_idx]
+                },
+                'geometry': {
+                    'rings': mask
+                }
+        })
+        
+        return {"output_vectors": json.dumps(features)}
+
+    def tta_detect_objects(self, **pixelBlocks):
+        import torch
+        from fastai.vision.transform import dihedral_affine, rotate
+        from fastai.vision import Image
+        input_image = pixelBlocks["raster_pixels"].astype(np.float32)
+        tile_size = input_image.shape[1]
+        pad = self.child_object_detector.padding
+        allboxes = torch.empty(0,4)
+        allclasses = []
+        allscores = torch.empty(0)
+        boxes_list, scores_list, labels_list = [], [], []
+        transforms = [0]
+        if self.use_tta:
+            if self.json_info["ImageSpaceUsed"] == "MAP_SPACE":
+                transforms = list(range(8))
+            else:
+                transforms = [
+                    0,
+                    2,
+                ]  # no vertical flips for pixel space (oriented imagery)
+        for k in transforms:
+            out = dihedral_affine(Image(torch.tensor(input_image.copy() / 256.0)), k)
+            pixelBlocksCopy = pixelBlocks.copy()
+            pixelBlocksCopy["raster_pixels"] = (out.data * 256).numpy()
+            polygons, scores, classes = self.detect_objects(**pixelBlocksCopy)
+            bboxes = self.get_img_bbox(tile_size, polygons, scores, classes)
+            if bboxes is not None:
+                fixed_img_bboxes = dihedral_affine(bboxes, k)
+                if k == 5 or k == 6:
+                    fixed_img_bboxes = rotate(fixed_img_bboxes, 180)
+                allboxes = torch.cat([allboxes, (fixed_img_bboxes.data[0]+1) / 2.0])
+                allclasses = allclasses + fixed_img_bboxes.data[1].tolist()
+                allscores = np.concatenate([allscores, torch.tensor(scores) * 0.01])
+                boxes_list.append((fixed_img_bboxes.data[0] + 1) / 2.0)
+                scores_list.append(torch.tensor(scores) * 0.01)  # normalize to [0,1]
+                labels_list.append(fixed_img_bboxes.data[1].tolist())
+        try:
+            from ensemble_boxes import weighted_boxes_fusion
+            weights = [2] + [1] * (len(labels_list) - 1)
+            iou_thr = self.nms_overlap
+            skip_box_thr = 0.0001
+            boxes, scores, labels = weighted_boxes_fusion(
+                boxes_list,
+                scores_list,
+                labels_list,
+                weights=weights,
+                iou_thr=iou_thr,
+                skip_box_thr=skip_box_thr,
+            )
+        except:
+            import warnings
+            warnings.warn("Unable to perform weighted boxes fusion... use NMS")
+            boxes, scores, labels = np.array(allboxes), allscores, np.array(allclasses)
+        bboxes = boxes * tile_size - pad
+        polygons = self.convert_bounding_boxes_to_coord_list(bboxes)
+        return polygons, np.array(scores * 100).astype(float), labels.astype(int)
+
+    def get_img_bbox(self, tile_size, polygons, scores, classes):
+        from fastai.vision import ImageBBox
+        pad = self.child_object_detector.padding
+        bboxes = []
+        for i, polygon in enumerate(polygons):
+            x1, y1 = np.around(polygon).astype(int)[0]
+            x2, y2 = np.around(polygon).astype(int)[2]
+            bboxes.append([x1 + pad, y1 + pad, x2 + pad, y2 + pad])
+        n = len(bboxes)
+        if n > 0:
+            return ImageBBox.create(
+                tile_size,
+                tile_size,
+                bboxes,
+                labels=classes,
+                classes=["Background"] + [x["Name"] for x in self.json_info["Classes"]],
+            )
+        else:
+            return None
+    def convert_bounding_boxes_to_coord_list(self, bounding_boxes):
+        """
+        convert bounding box numpy array to python list of point arrays
+        :param bounding_boxes: numpy array of shape [n, 4]
+        :return: python array of point numpy arrays, each point array is in shape [4,2]
+        """
+        num_bounding_boxes = bounding_boxes.shape[0]
+        bounding_box_coord_list = []
+        for i in range(num_bounding_boxes):
+            coord_array = np.empty(shape=(4, 2), dtype=float)
+            coord_array[0][0] = bounding_boxes[i][0]
+            coord_array[0][1] = bounding_boxes[i][1]
+            coord_array[1][0] = bounding_boxes[i][0]
+            coord_array[1][1] = bounding_boxes[i][3]
+            coord_array[2][0] = bounding_boxes[i][2]
+            coord_array[2][1] = bounding_boxes[i][3]
+            coord_array[3][0] = bounding_boxes[i][2]
+            coord_array[3][1] = bounding_boxes[i][1]
+            bounding_box_coord_list.append(coord_array)
+        return bounding_box_coord_list
+        
+    def detect_objects(self, **pixelBlocks):
+        polygon_list, scores, classes = self.child_object_detector.vectorize(
+            **pixelBlocks
+        )
+        padding = self.child_object_detector.padding
+        keep_polygon = []
+        keep_scores = []
+        keep_classes = []
+        chip_sz = self.json_info["ImageHeight"]
+        for idx, polygon in enumerate(polygon_list):
+            centroid = polygon.mean(0)
+            i, j = int(centroid[0]) // chip_sz, int(centroid[1]) // chip_sz
+            x, y = int(centroid[0]) % chip_sz, int(centroid[1]) % chip_sz
+            x1, y1 = polygon[0]
+            x2, y2 = polygon[2]
+            # fix polygon by removing padded regions
+            polygon[:, 0] = polygon[:, 0] - (2 * i + 1) * padding
+            polygon[:, 1] = polygon[:, 1] - (2 * j + 1) * padding
+            X1, Y1, X2, Y2 = (
+                i * chip_sz,
+                j * chip_sz,
+                (i + 1) * chip_sz,
+                (j + 1) * chip_sz,
+            )
+            t = 2.0  # within 2 pixels of edge
+            # if centroid not in center, reduce confidence
+            # so box can be filtered out during NMS
+            if (
+                x < padding
+                or x > chip_sz - padding
+                or y < padding
+                and y > chip_sz - padding
+            ):
+                scores[idx] = (self.child_object_detector.thres * 100) + scores[
+                    idx
+                ] * 0.01
+            # if not excluded due to touching edge of tile
+            if not (
+                self.child_object_detector.filter_outer_padding_detections
+                and any(
+                    [
+                        abs(X1 - x1) < t,
+                        abs(X2 - x2) < t,
+                        abs(Y1 - y1) < t,
+                        abs(Y2 - y2) < t,
+                    ]
+                )
+            ):  # touches edge
+                keep_polygon.append(polygon)
+                keep_scores.append(scores[idx])
+                keep_classes.append(classes[idx])
+        return keep_polygon, keep_scores, keep_classes
+

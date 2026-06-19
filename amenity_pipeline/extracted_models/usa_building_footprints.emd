@@ -1,0 +1,43 @@
+{
+    "ModelParameters": {
+        "pointrend": false,
+        "backbone": "resnet50",
+        "backend": "pytorch"
+    },
+    "Framework": "arcgis.learn.models._inferencing",
+    "ModelConfiguration": "_maskrcnn_inferencing",
+    "InferenceFunction": "ArcGISInstanceDetector.py",
+    "ModelType": "InstanceDetection",
+    "MaskRCNNkwargs": {},
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "SupportsVariableTileSize": true,
+    "Classes": [
+        {
+            "Value": 1,
+            "Name": "1",
+            "Color": [
+                187,
+                194,
+                137
+            ]
+        }
+    ],
+    "ArcGISLearnVersion": "1.9.0",
+    "ModelFile": "usa_building_footprints.pth",
+    "ImageHeight": 512,
+    "ImageWidth": 512,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "1.0000e-04",
+    "ModelName": "MaskRCNN",
+    "backend": "pytorch",
+    "average_precision_score": {
+        "1": 0.7187471585753209
+    },
+    "resize_to": null,
+    "IsMultispectral": false,
+    "Version": "2025.11.10"
+}

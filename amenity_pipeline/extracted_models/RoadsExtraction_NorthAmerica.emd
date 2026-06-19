@@ -1,0 +1,60 @@
+{
+    "Framework": "arcgis.learn.models._inferencing",
+    "InferenceFunction": "ArcGISImageClassifier.py",
+    "ModelConfiguration": "_road_infrencing",
+    "ModelType": "ImageClassification",
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "ModelParameters": {
+        "backbone": "resnet34",
+        "backend": "pytorch",
+        "opt_func": null,
+        "opt_func_args": "",
+        "loss": "road_orient_loss",
+        "loss_weights": [
+            1.0,
+            1.0
+        ],
+        "mtl_model": "hourglass",
+        "model_init_kwargs": {},
+        "learner_params": {}
+    },
+    "Classes": [
+        {
+            "Value": 1,
+            "Name": 1,
+            "Color": [
+                57,
+                243,
+                218
+            ]
+        }
+    ],
+    "RoadOrientation": {
+        "class_mapping": {
+            "0": 0,
+            "1": 1
+        },
+        "orient_bin_size": 20,
+        "orient_theta": 8.0,
+        "multi_scale": null,
+        "transforms": "[[[RandomCrop(size=(224, 224), padding=None), Resize(size=224, interpolation=PIL.Image.NEAREST), RandomHorizontalFlip(p=0.5), RandomVerticalFlip(p=0.5), Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])], [ColorJitter(brightness=[0.9, 1.1], contrast=[0.9, 1.1], saturation=None, hue=None), ToTensor()]], [[Resize(size=224, interpolation=PIL.Image.NEAREST)], [ToTensor()], [Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]]]"
+    },
+    "SupportsVariableTileSize": false,
+    "ArcGISLearnVersion": "1.8.3",
+    "ModelFile": "RoadsExtraction_NorthAmerica.pth",
+    "ImageHeight": 224,
+    "ImageWidth": 224,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "1.7378e-03",
+    "ModelName": "MultiTaskRoadExtractor",
+    "backend": "pytorch",
+    "resize_to": 224,
+    "IsMultispectral": false,
+    "test_time_augmentation": true,
+    "ModelVersion": "2021.12",
+    "Version": "2022.08.25"
+}

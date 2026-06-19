@@ -1,0 +1,60 @@
+{
+    "Framework": "arcgis.learn.models._inferencing",
+    "InferenceFunction": "ArcGISImageClassifier.py",
+    "ModelConfiguration": "sidewalk_crosswalk",
+    "ModelType": "ImageClassification",
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "Classes": [
+        {
+            "Value": 0,
+            "Name": "Sidewalk",
+            "Color": [
+                57,
+                243,
+                218
+            ]
+        },
+		{
+            "Value": 1,
+            "Name": "Road",
+            "Color": [
+                0,
+                255,
+                166
+            ]
+        },
+		{
+            "Value": 2,
+            "Name": "Crosswalk",
+            "Color": [
+                204,
+                77,
+                242
+            ]
+        },
+		{
+            "Value": 3,
+            "Name": "Others",
+            "Color": [
+                255,
+                166,
+                255
+            ]
+        }
+    ],
+    "SupportsVariableTileSize": false,
+    "ArcGISLearnVersion": "2.4.3",
+    "ImageHeight": 1024,
+    "ImageWidth": 1024,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "1.7378e-03",
+    "ModelName": "Tile2Net",
+    "backend": "pytorch",
+    "resize_to": 224,
+    "IsMultispectral": false,
+    "test_time_augmentation": false
+}

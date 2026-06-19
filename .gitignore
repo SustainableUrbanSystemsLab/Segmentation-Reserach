@@ -13,3 +13,6 @@ planet.local.json
 *.pyc
 /data
 /runs/segment/results
+/models
+/models
+/amenity_pipeline/models

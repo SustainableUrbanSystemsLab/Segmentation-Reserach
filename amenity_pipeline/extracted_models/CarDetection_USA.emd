@@ -1,0 +1,43 @@
+{
+    "ModelParameters": {
+        "pointrend": false,
+        "backbone": "resnet50",
+        "backend": "pytorch"
+    },
+    "Framework": "arcgis.learn.models._inferencing",
+    "ModelConfiguration": "_maskrcnn_inferencing",
+    "InferenceFunction": "ArcGISInstanceDetector.py",
+    "ModelType": "InstanceDetection",
+    "MaskRCNNkwargs": {},
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "SupportsVariableTileSize": true,
+    "Classes": [
+        {
+            "Value": 2,
+            "Name": "2",
+            "Color": [
+                12,
+                62,
+                153
+            ]
+        }
+    ],
+    "ArcGISLearnVersion": "1.8.3",
+    "ModelFile": "CarDetection_USA.pth",
+    "ImageHeight": 400,
+    "ImageWidth": 400,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "slice('3.6308e-06', '3.6308e-05', None)",
+    "ModelName": "MaskRCNN",
+    "backend": "pytorch",
+    "average_precision_score": {
+        "2": 0.8133210387190236
+    },
+    "resize_to": 400,
+    "IsMultispectral": false,
+    "Version": "2023.08.08"
+}

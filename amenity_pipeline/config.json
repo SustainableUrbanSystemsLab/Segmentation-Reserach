@@ -1,0 +1,98 @@
+{
+  "pipeline_image": "Maps/Tiles/Atlanta_split_google/tile_002_003.tif",
+
+  "_comment_models": "Models section: script paths, output paths, thresholds, and inference settings only. No weights or radii here — those belong in final_classes below. Set 'enabled': false to skip a model without deleting it.",
+  "models": [
+    {
+      "name": "parking_lots",
+      "enabled": true,
+      "script_path": "prediction_models/parking_lot_predict.py",
+      "output_path": "Results/amenity_pipeline/parking.geojson",
+      "extra_args": ["--threshold", "0.35", "--overlap", "256", "--cell_size", "0.3"]
+    },
+    {
+      "name": "high_res_roads",
+      "enabled": true,
+      "script_path": "prediction_models/road_extraction.py",
+      "output_path": "Results/amenity_pipeline/road_extraction.geojson",
+      "python_interpreter": "C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\Scripts\\propy.bat",
+      "extra_args": ["--threshold", "0.25", "--overlap", "256", "--cell_size", "0.3"]
+    },
+    {
+      "name": "pools",
+      "enabled": false,
+      "script_path": "prediction_models/pool_predict.py",
+      "output_path": "Results/amenity_pipeline/pools.geojson",
+      "python_interpreter": "C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\Scripts\\propy.bat",
+      "extra_args": ["--threshold", "0.7", "--overlap", "256", "--cell_size", "0.15"]
+    },
+    {
+      "name": "pedestrian_infrastructure",
+      "enabled": true,
+      "script_path": "prediction_models/pedestrian_predict.py",
+      "output_path": "Results/amenity_pipeline/pedestrian.geojson",
+      "is_multiclass": true,
+      "classes": {
+        "0": { "name": "sidewalk",   "threshold": 0.5 },
+        "1": { "name": "ped_model_roads",       "threshold": 0.5 },
+        "2": { "name": "crosswalk",  "threshold": 0.5 }
+      },
+      "extra_args": ["--overlap", "512", "--cell_size", "0.2"]
+    },
+    {
+      "name": "buildings",
+      "enabled": true,
+      "script_path": "prediction_models/building_predict.py",
+      "output_path": "Results/amenity_pipeline/buildings.geojson",
+      "extra_args": ["--threshold", "0.96", "--overlap", "256", "--cell_size", "0.3", "--regularize"]
+    },
+    {
+      "name": "cars",
+      "enabled": true,
+      "script_path": "prediction_models/car_predict.py",
+      "output_path": "Results/amenity_pipeline/cars.geojson",
+      "extra_args": ["--threshold", "0.25", "--overlap", "200", "--cell_size", "0.2"]
+    },
+    {
+      "name": "land_cover",
+      "enabled": true,
+      "script_path": "prediction_models/land_cover_predict.py",
+      "output_path": "Results/amenity_pipeline/land_cover.geojson",
+      "python_interpreter": "C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\Scripts\\propy.bat",
+      "is_multiclass": true,
+      "classes": {
+        "1": { "name": "Water",               "threshold": 0.50 },
+        "2": { "name": "Wetlands",            "threshold": 0.50 },
+        "3": { "name": "Tree Canopy",         "threshold": 0.55 },
+        "4": { "name": "Shrubland",           "threshold": 0.50 },
+        "5": { "name": "Low Vegetation",      "threshold": 0.30 },
+        "6": { "name": "Barren",              "threshold": 0.50 },
+        "7": { "name": "Structures",          "threshold": 0.78 },
+        "8": { "name": "Impervious Surfaces", "threshold": 0.50 },
+        "9": { "name": "Impervious Roads",    "threshold": 0.45 }
+      },
+      "extra_args": ["--overlap", "256", "--cell_size", "0.3"]
+    }
+  ],
+
+  "visualization": {
+    "debug_high_res_roads": true,
+    "road_debug_color": [255, 0, 255], 
+    "road_debug_alpha": 0.65
+  },
+
+"_comment_final_classes": "Recalibrated for Pedestrian Functionality. Weights determine activity classification (Sitting vs. Walking vs. Dead Zone). Radius handles spatial accessibility halo in pixels (1 px = 0.3m).",
+  "final_classes": {
+    "water":      { "weight":  0.15, "radius":  40 },
+    "canopy":     { "weight":  0.55, "radius": 80 },
+    "lowveg":     { "weight":  0.40, "radius": 40 },
+    "impervious": { "weight": -0.15, "radius":  16 },
+    "road":       { "weight": -0.35, "radius": 24 },
+    "parking":    { "weight": -0.25, "radius": 30 },
+    "building":   { "weight":  -0.05, "radius":  0 },
+    "sidewalk":   { "weight":  0.45, "radius": 60 },
+    "crosswalk":  { "weight":  0.25, "radius": 30 },
+    "car":        { "weight": -0.15, "radius": 16 },
+    "pool":       { "weight":  0.30, "radius": 20 }
+  }
+}

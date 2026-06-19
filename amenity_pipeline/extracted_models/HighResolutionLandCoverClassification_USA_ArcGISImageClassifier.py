@@ -1,0 +1,300 @@
+
+
+import arcpy
+import numpy as np
+import json
+import sys, os, importlib, importlib.util
+import math
+
+
+def get_available_device(max_memory=0.8):
+    '''
+    select available device based on the memory utilization status of the device
+    :param max_memory: the maximum memory utilization ratio that is considered available
+    :return: GPU id that is available, -1 means no GPU is available/uses CPU, if GPUtil package is not installed, will
+    return 0
+    '''
+    try:
+        import GPUtil
+    except ModuleNotFoundError:
+        return 0
+
+    GPUs = GPUtil.getGPUs()
+    freeMemory = 0
+    available = 0
+    for GPU in GPUs:
+        if GPU.memoryUtil > max_memory:
+            continue
+        if GPU.memoryFree >= freeMemory:
+            freeMemory = GPU.memoryFree
+            available = GPU.id
+
+    return available
+
+def chunk_it(image, tile_size):
+    s = image.shape
+    num_rows = math.ceil(s[0]/tile_size)
+    num_cols = math.ceil(s[1]/tile_size)
+    r = np.array_split(image, num_rows)
+    rows = []
+    for x in r:
+        x = np.array_split(x, num_cols, axis=1)
+        rows.append(x)
+    return rows, num_rows, num_cols
+
+def crop_center(img, pad):
+    if pad == 0:
+        return img
+    return img[pad:-pad, pad: -pad, :]
+
+def crop_flatten(chunked, pad):
+    imgs = []
+    for r, row  in enumerate(chunked):
+        for c, col in enumerate(row):
+            col = crop_center(col, pad)
+            imgs.append(col)
+    return imgs
+
+def patch_chips(imgs, n_rows, n_cols):
+    h_stacks = []
+    for i in range(n_rows):
+        h_stacks.append(np.hstack(imgs[i*n_cols:n_cols*(i+1) ]))
+    return np.vstack(h_stacks)
+
+attribute_table = {
+    'displayFieldName': '',
+    'fieldAliases': {
+        'OID': 'OID',
+        'Value': 'Value',
+        'Class': 'Class',
+        'Red': 'Red',
+        'Green': 'Green',
+        'Blue': 'Blue'
+    },
+    'fields': [
+        {
+            'name': 'OID',
+            'type': 'esriFieldTypeOID',
+            'alias': 'OID'
+        },
+        {
+            'name': 'Value',
+            'type': 'esriFieldTypeInteger',
+            'alias': 'Value'
+        },
+        {
+            'name': 'Class',
+            'type': 'esriFieldTypeString',
+            'alias': 'Class'
+        },
+        {
+            'name': 'Red',
+            'type': 'esriFieldTypeInteger',
+            'alias': 'Red'
+        },
+        {
+            'name': 'Green',
+            'type': 'esriFieldTypeInteger',
+            'alias': 'Green'
+        },
+        {
+            'name': 'Blue',
+            'type': 'esriFieldTypeInteger',
+            'alias': 'Blue'
+        }
+    ],
+    'features': []
+}
+
+ 
+
+class HighResolutionLandCoverClassification_USA_ArcGISImageClassifier:
+    def __init__(self):
+        self.name = 'Image Classifier'
+        self.description = 'Image classification python raster function to inference a pytorch image classifier'
+
+    def initialize(self, **kwargs):
+        self.kwargs = kwargs
+        if 'model' not in kwargs:
+            return
+
+        model = kwargs['model']
+        model_as_file = True
+        try:
+            with open(model, 'r') as f:
+                self.json_info = json.load(f)
+        except FileNotFoundError:
+            try:
+                self.json_info = json.loads(model)
+                model_as_file = False
+            except json.decoder.JSONDecodeError:
+                raise Exception("Invalid model argument")
+
+        framework = self.json_info['Framework']
+        if 'ModelConfiguration' in self.json_info:
+            if isinstance(self.json_info['ModelConfiguration'], str):
+                ChildImageClassifier = getattr(importlib.import_module(
+                    '{}.{}'.format(framework, self.json_info['ModelConfiguration'])), 'ChildImageClassifier')
+            else:
+                ChildImageClassifier = getattr(importlib.import_module(
+                    '{}.{}'.format(framework, self.json_info['ModelConfiguration']['Name'])), 'ChildImageClassifier')
+        else:
+            raise Exception("Invalid model configuration")
+
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        device = None
+        if 'device' in kwargs:
+            device = kwargs['device']
+            if device == -2:
+                device = get_available_device()
+
+        if device is not None:
+            if device >= 0:
+                try:
+                    import torch
+                except Exception:
+                    raise Exception("PyTorch is not installed. Install it using conda install -c esri deep-learning-essentials")
+                torch.cuda.set_device(device)
+                arcpy.env.processorType = "GPU"
+                arcpy.env.gpuId = str(device)
+            else:
+                arcpy.env.processorType = "CPU"
+
+        # model_folder = os.path.dirname(os.path.abspath(__file__))
+        # if not model_folder in sys.path:
+        #     sys.path.append(model_folder)
+        spec = importlib.util.spec_from_file_location('_unet', os.path.join(os.path.dirname(os.path.abspath(__file__)), '_unet.py'))
+        _unet = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_unet)
+        # from _unet import ChildImageClassifier as ChildImageClassifier_unet  # hotfix
+        # ChildImageClassifier = ChildImageClassifier_unet  # Hotfix
+        ChildImageClassifier = _unet.ChildImageClassifier # Hotfix
+
+        self.child_image_classifier = ChildImageClassifier()
+        self.child_image_classifier.initialize(model, model_as_file)
+
+    def getParameterInfo(self):
+        required_parameters = [
+            {
+                'name': 'raster',
+                'dataType': 'raster',
+                'required': True,
+                'displayName': 'Raster',
+                'description': 'Input Raster'
+            },
+            {
+                'name': 'model',
+                'dataType': 'string',
+                'required': True,
+                'displayName': 'Input Model Definition (EMD) File',
+                'description': 'Input model definition (EMD) JSON file'
+            },
+            {
+                'name': 'device',
+                'dataType': 'numeric',
+                'required': False,
+                'displayName': 'Device ID',
+                'description': 'Device ID'
+            }
+        ]
+        return self.child_image_classifier.getParameterInfo(required_parameters) + [
+            {
+                'name': 'detailed_classes',
+                'dataType': 'GPString',
+                'value': 'True',
+                'domain': ['True', 'False'],
+                'required': False,
+                'displayName': 'Detailed Classes',
+                'description': 'Detailed Classes'
+            }
+        ]
+
+    _active_model = '9class'
+    def _handle_model_bundle(self, scalars):
+        detailed_classes = scalars.get('detailed_classes', 'true').lower()
+        if detailed_classes not in ['true', 'false']:
+            raise Exception(f"Invalid value '{detailed_classes}' supplied for parameter 'Detailed Classes'. Valid inputs are true, false.")
+        #
+        basepath = os.path.dirname(os.path.abspath(self.kwargs['model']))
+        if detailed_classes in [
+            "true",
+            "1",
+            "t",
+            "y",
+            "yes",
+        ]:  # Default value True
+            target_model = '9class'
+            mpath = os.path.join(basepath, 'HighResolutionLandCoverClassification_USA.emd')
+        else:
+            target_model = '7class'
+            mpath = os.path.join(basepath, '7class', '7class.emd')
+        #
+        if target_model != self._active_model:
+            self.kwargs['model'] = mpath
+            scalars['model'] = mpath
+            scalars['pythonmodule'] = os.path.join(os.path.dirname(mpath), 'ArcGISImageClassifier.py')
+            self.initialize(**self.kwargs)
+            self._active_model = target_model
+        #
+        return scalars
+
+    def getConfiguration(self, **scalars):
+        scalars = self._handle_model_bundle(scalars)
+        configuration = self.child_image_classifier.getConfiguration(**scalars)
+        if 'DataRange' in self.json_info:
+            configuration['dataRange'] = tuple(self.json_info['DataRange'])
+        configuration['inheritProperties'] = 2|4|8
+        configuration['inputMask'] = True
+        return configuration
+
+    def updateRasterInfo(self, **kwargs):
+        kwargs['output_info']['bandCount'] = 1
+        #todo: type is determined by the value range of classes in the json file
+        prob_raster = getattr(self.child_image_classifier,'probability_raster',False)
+        if prob_raster:
+            kwargs['output_info']['pixelType'] = 'f4' # To ensure that output pixels are in prob range 0 to 1
+        else:
+            kwargs['output_info']['pixelType'] = 'i4'
+        class_info = self.json_info['Classes']
+        attribute_table['features'] = []
+        for i, c in enumerate(class_info):
+            attribute_table['features'].append(
+                {
+                    'attributes':{
+                        'OID':i+1,
+                        'Value':c['Value'],
+                        'Class':c['Name'],
+                        'Red':c['Color'][0],
+                        'Green':c['Color'][1],
+                        'Blue':c['Color'][2]
+                    }
+                }
+            )
+        kwargs['output_info']['rasterAttributeTable'] = json.dumps(attribute_table)
+
+        return kwargs
+
+
+    def updatePixels(self, tlc, shape, props, **pixelBlocks):
+        # set pixel values in invalid areas to 0
+           
+        raster_mask = pixelBlocks['raster_mask']
+        raster_pixels = pixelBlocks['raster_pixels']
+        raster_pixels[np.where(raster_mask == 0)] = 0
+        pixelBlocks['raster_pixels'] = raster_pixels
+
+        if self.json_info['ModelName'] == 'MultiTaskRoadExtractor':
+            xx = self.child_image_classifier.detectRoads(tlc, shape, props, **pixelBlocks).astype(props['pixelType'], copy=False)   
+            pixelBlocks['output_pixels'] = xx
+        elif hasattr(self.child_image_classifier, 'updatePixelsTTA'):
+            xx = self.child_image_classifier.updatePixelsTTA(tlc, shape, props, **pixelBlocks).astype(props['pixelType'], copy=False)   
+            pixelBlocks['output_pixels'] = xx
+        else:
+            xx = self.child_image_classifier.updatePixels(tlc, shape, props, **pixelBlocks).astype(props['pixelType'], copy=False)   
+            tytx = getattr(self.child_image_classifier, 'tytx', self.json_info['ImageHeight'])
+            chunks, num_rows, num_cols =  chunk_it(xx.transpose(1, 2, 0), tytx)# self.json_info['ImageHeight'])  # ImageHeight = ImageWidth
+            xx = patch_chips(crop_flatten(chunks, self.child_image_classifier.padding), num_rows, num_cols)
+            xx = xx.transpose(2, 0, 1)
+            pixelBlocks['output_pixels'] = xx
+
+        return pixelBlocks

@@ -1,0 +1,71 @@
+{
+    "ModelParameters": {
+        "pointrend": false,
+        "backbone": "resnet50",
+        "backend": "pytorch"
+    },
+    "Framework": "arcgis.learn.models._inferencing",
+    "ModelConfiguration": "_maskrcnn_inferencing",
+    "InferenceFunction": "ArcGISInstanceDetector.py",
+    "ModelType": "InstanceDetection",
+    "MaskRCNNkwargs": {},
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "SupportsVariableTileSize": true,
+    "Classes": [
+        {
+            "Value": 1,
+            "Name": "Vacant",
+            "Color": [
+                132,
+                225,
+                108
+            ]
+        },
+        {
+            "Value": 2,
+            "Name": "Occupied",
+            "Color": [
+                41,
+                35,
+                190
+            ]
+        }
+    ],
+    "ModelFormat": "NCHW",
+    "MinCellSize": {
+        "x": 0.07,
+        "y": 0.07,
+        "spatialReference": {
+            "wkid": 102100,
+            "latestWkid": 3857
+        }
+    },
+    "MaxCellSize": {
+        "x": 0.07,
+        "y": 0.07,
+        "spatialReference": {
+            "wkid": 102100,
+            "latestWkid": 3857
+        }
+    },
+    "ArcGISLearnVersion": "2.1.0.3",
+    "monitored_valid_loss": 2.127586603164673,
+    "ModelFile": "ParkingSpotDetection_USA.pth",
+    "ImageHeight": 224,
+    "ImageWidth": 224,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "slice('1.9055e-05', '1.9055e-04', None)",
+    "ModelName": "MaskRCNN",
+    "backend": "pytorch",
+    "average_precision_score": {
+        "1": 0.6440110500616358,
+        "2": 0.6864074586100188
+    },
+    "resize_to": 224,
+    "IsMultispectral": false,
+    "Version": "2024.05.18"
+}

@@ -1,0 +1,116 @@
+{
+    "Framework": "arcgis.learn.models._inferencing",
+    "ModelConfiguration": "_unet",
+    "ModelType": "ImageClassification",
+    "InferenceFunction": "HighResolutionLandCoverClassification_USA_ArcGISImageClassifier.py",
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "ignore_mapped_class": [],
+    "SupportsVariableTileSize": true,
+    "Classes": [
+        {
+            "Value": 1,
+            "Name": "Water",
+            "Color": [
+                0,
+                197,
+                255
+            ]
+        },
+        {
+            "Value": 2,
+            "Name": "Wetlands",
+            "Color": [
+                0,
+                168,
+                132
+            ]
+        },
+        {
+            "Value": 3,
+            "Name": "Tree Canopy",
+            "Color": [
+                38,
+                115,
+                0
+            ]
+        },
+        {
+            "Value": 4,
+            "Name": "Shrubland",
+            "Color": [
+                76,
+                230,
+                0
+            ]
+        },
+        {
+            "Value": 5,
+            "Name": "Low Vegetation ",
+            "Color": [
+                163,
+                255,
+                115
+            ]
+        },
+        {
+            "Value": 6,
+            "Name": "Barren",
+            "Color": [
+                255,
+                170,
+                0
+            ]
+        },
+        {
+            "Value": 7,
+            "Name": "Structures",
+            "Color": [
+                255,
+                0,
+                0
+            ]
+        },
+        {
+            "Value": 8,
+            "Name": "Impervious Surfaces",
+            "Color": [
+                156,
+                156,
+                156
+            ]
+        },
+        {
+            "Value": 9,
+            "Name": "Impervious Roads",
+            "Color": [
+                0,
+                0,
+                0
+            ]
+        }
+    ],
+    "ModelFormat": "NCHW",
+    "MinCellSize": null,
+    "MaxCellSize": null,
+    "ArcGISLearnVersion": "2.0.0",
+    "ModelFile": "HighResolutionLandCoverClassification_USA.pth",
+    "ImageHeight": 512,
+    "ImageWidth": 512,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "LearningRate": "1.0000e-04",
+    "ModelName": "UnetClassifier",
+    "backend": "pytorch",
+    "ModelParameters": {
+        "backbone": "resnet34",
+        "backend": "pytorch"
+    },
+    "accuracy": "8.6501e-01",
+    "resize_to": 512,
+    "IsMultispectral": false,
+    "per_class_metrics": "{\"NoData\":{\"precision\":0.5513494015,\"recall\":0.220427528,\"f1\":0.3149422705},\"Water\":{\"precision\":0.9361351132,\"recall\":0.9304614067,\"f1\":0.9332896471},\"Wetlands\":{\"precision\":0.8165944815,\"recall\":0.7590476274,\"f1\":0.7867702246},\"Tree Canopy\":{\"precision\":0.9047685862,\"recall\":0.9314316511,\"f1\":0.9179065228},\"Shrubland\":{\"precision\":0.5162523985,\"recall\":0.1864305437,\"f1\":0.2739363909},\"Low Vegetation \":{\"precision\":0.8597693443,\"recall\":0.8667619228,\"f1\":0.8632515073},\"Barren\":{\"precision\":0.671654284,\"recall\":0.5092239976,\"f1\":0.5792679787},\"Structures\":{\"precision\":0.805103004,\"recall\":0.8488666415,\"f1\":0.8264058232},\"Impervious Surfaces\":{\"precision\":0.7353146076,\"recall\":0.6855627894,\"f1\":0.7095676064},\"Impervious Roads\":{\"precision\":0.7628116608,\"recall\":0.8123831153,\"f1\":0.7868173122}}",
+    "Version": "2023.10.09"
+}

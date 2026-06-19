@@ -1,0 +1,35 @@
+{
+    "ModelType": "ObjectDetection",
+    "InferenceFunction": "TreeDetector.py",
+    "ModelConfiguration": "TreeDetector",
+    "ExtractBands": [
+        0,
+        1,
+        2
+    ],
+    "Classes": [
+        {
+            "Value": 1,
+            "Name": "Tree",
+            "Color": [
+                186,
+                199,
+                208
+            ]
+        }
+    ],
+    "SupportsVariableTileSize": false,
+    "ModelFile": "NEON.pt",
+    "ModelFormat": "NCHW",
+    "ImageHeight": 400,
+    "ImageWidth": 400,
+    "ImageSpaceUsed": "MAP_SPACE",
+    "ModelName": "DeepForest",
+    "backend": "pytorch",
+    "ModelParameters": {
+        "backend": "pytorch"
+    },
+    "resize_to": null,
+    "IsMultispectral": false,
+    "Version": "2024.03.28"
+}
