@@ -153,14 +153,14 @@ def run_tiled_prediction(model, image_path, threshold, overlap, cell_size, devic
     count_accum = np.maximum(count_accum, 1.0)
     avg_probs = prob_accum / count_accum
     
-    # Class mapping: Value 0: Sidewalk, 1: Road, 2: Crosswalk, 3: Others (background)
+    # Binary threshold mapping: background class is index 3
     pred_mask = np.argmax(avg_probs, axis=0).astype(np.uint8)
     
     # Filter out weak detections below threshold (assign to background/others = 3)
     max_probs = np.max(avg_probs, axis=0)
     pred_mask[max_probs < threshold] = 3
     
-    return pred_mask, tx, crs
+    return pred_mask, avg_probs, tx, crs
 
 def mask_to_geojson(pred_mask, transform, crs, output_path):
     """Vectorizes the classified numpy raster mask into spatial geometries."""
@@ -211,11 +211,33 @@ def main():
 
     try:
         model = load_model(args.weights, device)
-        pred_mask, transform, crs = run_tiled_prediction(
+        pred_mask, avg_probs, transform, crs = run_tiled_prediction(
             model, args.image, args.threshold, args.overlap, args.cell_size, device
         )
         
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+
+        # Save per-class pedestrian probability raster for confidence-based fusion
+        # Band 1=sidewalk, Band 2=road (ped model), Band 3=crosswalk
+        try:
+            prob_output_path = args.output.replace(".geojson", ".prob.tif")
+            with rasterio.open(
+                prob_output_path, "w",
+                driver="GTiff",
+                height=avg_probs.shape[1], width=avg_probs.shape[2],
+                count=3,
+                dtype=rasterio.float32,
+                crs=crs,
+                transform=transform,
+                compress="lzw"
+            ) as dst:
+                dst.write(avg_probs[0].astype(np.float32), 1)  # sidewalk
+                dst.write(avg_probs[1].astype(np.float32), 2)  # road
+                dst.write(avg_probs[2].astype(np.float32), 3)  # crosswalk
+            print(f"[Pedestrian] Probability raster saved to: {prob_output_path}")
+        except Exception as prob_err:
+            print(f"[Pedestrian] WARNING: Could not save probability raster: {prob_err}")
+
         mask_to_geojson(pred_mask, transform, crs, args.output)
         
         print("[+] Pedestrian prediction processing complete.")

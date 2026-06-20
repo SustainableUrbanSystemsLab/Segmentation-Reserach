@@ -173,6 +173,11 @@ def run(image_path, threshold, overlap, cell_size, batch_size, tolerance, regula
             data = src.read([1, 2, 3], out_shape=(3, h, w), resampling=Resampling.bilinear)
 
     print(f"Image: {w}x{h}, CRS: {src.crs}")
+    src_crs = src.crs
+    src_tx = tx
+
+    # Accumulate per-pixel building confidence for confidence-based fusion
+    building_score_map = np.zeros((h, w), dtype=np.float32)
 
     # Build list of all tile positions
     tile_positions = [
@@ -217,6 +222,23 @@ def run(image_path, threshold, overlap, cell_size, batch_size, tolerance, regula
                     px_row = (p.centroid.y - tx.f) / tx.e
                     if cx0 <= px_col < cx1 and cy0 <= px_row < cy1:
                         all_polys.append(p)
+                        # Rasterize this instance's mask into the score map
+                        try:
+                            from rasterio.features import rasterize as rio_rasterize
+                            inst_raster = rio_rasterize(
+                                [(p, 1)],
+                                out_shape=(h, w),
+                                transform=tx,
+                                fill=0,
+                                dtype=np.float32,
+                                all_touched=True
+                            )
+                            # Keep the maximum score for overlapping instances
+                            building_score_map = np.maximum(
+                                building_score_map, inst_raster * score
+                            )
+                        except Exception:
+                            pass  # Non-critical — skip if rasterize fails for this instance
 
         done = min(batch_start + batch_size, total)
         if done % max(batch_size, 40) == 0 or done == total:
@@ -224,7 +246,41 @@ def run(image_path, threshold, overlap, cell_size, batch_size, tolerance, regula
 
     if not all_polys:
         print("No buildings detected.")
+        # Still save an empty (all-zeros) prob raster so fusion knows the model ran
+        try:
+            prob_output_path = output_path.replace(".geojson", ".prob.tif")
+            with rasterio.open(
+                prob_output_path, "w",
+                driver="GTiff",
+                height=h, width=w,
+                count=1,
+                dtype=rasterio.float32,
+                crs=src_crs,
+                transform=src_tx,
+                compress="lzw"
+            ) as dst:
+                dst.write(building_score_map, 1)
+        except Exception:
+            pass
         return
+
+    # Save building score raster for confidence-based fusion
+    try:
+        prob_output_path = output_path.replace(".geojson", ".prob.tif")
+        with rasterio.open(
+            prob_output_path, "w",
+            driver="GTiff",
+            height=h, width=w,
+            count=1,
+            dtype=rasterio.float32,
+            crs=src_crs,
+            transform=src_tx,
+            compress="lzw"
+        ) as dst:
+            dst.write(building_score_map, 1)
+        print(f"[Buildings] Probability raster saved to: {prob_output_path}")
+    except Exception as e:
+        print(f"[Buildings] WARNING: Could not save probability raster: {e}")
 
     # --- GEOMETRIC DISSOLVE/UNION STEP ---
     print(f"Dissolving {len(all_polys)} overlapping building windows into distinct blocks...")

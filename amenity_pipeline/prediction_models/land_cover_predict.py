@@ -96,7 +96,15 @@ def run(image_path, overlap, cell_size, batch_size, output_path):
             data = src.read([1, 2, 3], out_shape=(3, h, w), resampling=Resampling.bilinear)
 
     print(f"Image: {w}x{h}, CRS: {src.crs}")
+    src_crs = src.crs
+    src_tx = tx
     global_map = np.zeros((h, w), dtype=np.uint8)
+    # Accumulate per-class softmax probabilities for confidence-based fusion
+    # LC model has 9 classes (indices 0..8, where class label = index+1 for 1-based classes,
+    # but the model outputs indices 0-8 matching CLASS_MAPPING keys 1-9 directly via argmax)
+    NUM_LC_CLASSES = 9
+    prob_accumulator = np.zeros((NUM_LC_CLASSES, h, w), dtype=np.float32)
+    weight_accumulator = np.zeros((h, w), dtype=np.float32)
 
     tile_positions = [
         (row, col)
@@ -139,8 +147,10 @@ def run(image_path, overlap, cell_size, batch_size, output_path):
                     preds[failed_mask] = 0
 
             preds_np = preds.cpu().numpy()
+            probs_np = probs.cpu().numpy()  # Shape: (B, 9, H, W) — for prob raster accumulation
 
-        for (row, col), (tile, win_h, win_w), pred_tile in zip(batch_pos, tiles, preds_np):
+
+        for (row, col), (tile, win_h, win_w), pred_tile, prob_tile in zip(batch_pos, tiles, preds_np, probs_np):
             half = overlap // 2
             
             r0 = row + half if row > 0 else row
@@ -155,6 +165,9 @@ def run(image_path, overlap, cell_size, batch_size, output_path):
             
             if r1 > r0 and c1 > c0:
                 global_map[r0:r1, c0:c1] = pred_tile[tr0:tr1, tc0:tc1]
+                # Accumulate probabilities (all 9 channels) for the non-overlapping core
+                prob_accumulator[:, r0:r1, c0:c1] += prob_tile[1:, tr0:tr1, tc0:tc1]
+                weight_accumulator[r0:r1, c0:c1] += 1.0
 
         done = min(batch_start + batch_size, total)
         if done % max(batch_size, 10) == 0 or done == total:
@@ -199,6 +212,29 @@ def run(image_path, overlap, cell_size, batch_size, output_path):
     with open(output_path, "w") as f:
         json.dump(geojson, f)
     print(f"Done. {len(features)} land cover classification zones saved to: {output_path}")
+
+    # Normalize accumulated probability raster and save as multi-band float GeoTIFF
+    # Band N corresponds to LC class N (1=Water, 2=Wetlands, ..., 7=Structures, 8=Impervious, 9=Roads)
+    try:
+        weight_safe = np.maximum(weight_accumulator, 1.0)
+        for c in range(NUM_LC_CLASSES):
+            prob_accumulator[c] /= weight_safe
+        prob_output_path = output_path.replace(".geojson", ".prob.tif")
+        with rasterio.open(
+            prob_output_path, "w",
+            driver="GTiff",
+            height=h, width=w,
+            count=NUM_LC_CLASSES,
+            dtype=rasterio.float32,
+            crs=src_crs,
+            transform=src_tx,
+            compress="lzw"
+        ) as dst:
+            for c in range(NUM_LC_CLASSES):
+                dst.write(prob_accumulator[c], c + 1)  # Bands are 1-indexed
+        print(f"[LandCover] Probability raster ({NUM_LC_CLASSES} bands) saved to: {prob_output_path}")
+    except Exception as e:
+        print(f"[LandCover] WARNING: Could not save probability raster: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

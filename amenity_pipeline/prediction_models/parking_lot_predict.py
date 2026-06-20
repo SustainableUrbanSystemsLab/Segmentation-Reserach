@@ -148,6 +148,7 @@ def run(image_path, threshold, overlap, cell_size, batch_size, output_path, weig
     
     with rasterio.open(image_path) as src:
         native_res = src.res[0]
+        src_crs = src.crs
         if cell_size <= 0:
             cell_size = native_res
             w, h = src.width, src.height
@@ -235,6 +236,25 @@ def run(image_path, threshold, overlap, cell_size, batch_size, output_path, weig
             weight_grid[r:r+win_h, c:c+win_w] += 1.0
 
     np.divide(prob_accumulator, weight_grid, out=prob_accumulator, where=weight_grid > 0)
+
+    # Save probability raster for confidence-based fusion
+    try:
+        prob_output_path = output_path.replace(".geojson", ".prob.tif")
+        with rasterio.open(
+            prob_output_path, "w",
+            driver="GTiff",
+            height=h, width=w,
+            count=1,
+            dtype=rasterio.float32,
+            crs=src_crs,
+            transform=tx,
+            compress="lzw"
+        ) as dst:
+            dst.write(prob_accumulator, 1)
+        print(f"[Parking] Probability raster saved to: {prob_output_path}")
+    except Exception as e:
+        print(f"[Parking] WARNING: Could not save probability raster: {e}")
+
     binary_mask = (prob_accumulator >= threshold)
 
     from scipy.ndimage import binary_closing

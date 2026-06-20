@@ -114,6 +114,25 @@ class FinalClassConfig:
     name: str
     weight: float = 0.0   # Comfort score: positive = pleasant, negative = stressful
     radius: float = 0.0   # Dilation radius in pixels applied during mask fusion
+    # ── Confidence-based fusion scalars ───────────────────────────────────────
+    # fusion_conf:        Base multiplier for LC-derived-only classes (water, canopy,
+    #                     lowveg, impervious) competing in the per-pixel argmax.
+    # lc_source_weight:   How much to weight the LC probability channel when blending
+    #                     it into the composite confidence (road, building, canopy, lowveg).
+    # ped_source_weight:  Weight of pedestrian model road channel fused into road_conf.
+    # veg_suppress_factor: Building confidence multiplier in vegetation pixels (suppresses
+    #                      false detections on sports fields and tree shadows).
+    fusion_conf:          float = 1.0
+    lc_source_weight:     float = 0.0
+    ped_source_weight:    float = 0.0
+    veg_suppress_factor:  float = 1.0
+
+
+@dataclass
+class FusionParams:
+    """Global parameters for confidence-based mask fusion."""
+    binary_fallback_conf:    float = 0.50  # Confidence for classes with no prob raster
+    parking_road_dilation_px: int  = 50   # Parking proximity filter radius (0 = disabled)
 
 
 @dataclass
@@ -143,6 +162,7 @@ class PipelineConfig:
     pipeline_image: str
     models: List[ModelConfig]
     class_registry: Dict[int, FinalClassConfig] = field(default_factory=dict)
+    fusion_params: FusionParams = field(default_factory=FusionParams)
 
     @property
     def enabled_models(self) -> List[ModelConfig]:
@@ -196,6 +216,10 @@ def load_pipeline_config(config_path: Path | str = DEFAULT_CONFIG) -> PipelineCo
             name=FinalClass.name(final_id),
             weight=float(fc_raw.get("weight", _DEFAULT_WEIGHT.get(final_id, 0.0))),
             radius=float(fc_raw.get("radius", 0.0)),
+            fusion_conf=float(fc_raw.get("fusion_conf", 1.0)),
+            lc_source_weight=float(fc_raw.get("lc_source_weight", 0.0)),
+            ped_source_weight=float(fc_raw.get("ped_source_weight", 0.0)),
+            veg_suppress_factor=float(fc_raw.get("veg_suppress_factor", 1.0)),
         )
 
     # Parse models section
@@ -220,8 +244,16 @@ def load_pipeline_config(config_path: Path | str = DEFAULT_CONFIG) -> PipelineCo
             python_interpreter=m.get("python_interpreter"),
         ))
 
+    # Parse fusion global params
+    fusion_raw = raw.get("fusion", {})
+    fusion_params = FusionParams(
+        binary_fallback_conf=float(fusion_raw.get("binary_fallback_conf", 0.50)),
+        parking_road_dilation_px=int(fusion_raw.get("parking_road_dilation_px", 50)),
+    )
+
     return PipelineConfig(
         pipeline_image=raw.get("pipeline_image", ""),
         models=models,
         class_registry=class_registry,
+        fusion_params=fusion_params,
     )

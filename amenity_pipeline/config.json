@@ -33,9 +33,9 @@
       "output_path": "Results/amenity_pipeline/pedestrian.geojson",
       "is_multiclass": true,
       "classes": {
-        "0": { "name": "sidewalk",   "threshold": 0.5 },
+        "0": { "name": "sidewalk",   "threshold": 0.4 },
         "1": { "name": "ped_model_roads",       "threshold": 0.5 },
-        "2": { "name": "crosswalk",  "threshold": 0.5 }
+        "2": { "name": "crosswalk",  "threshold": 0.4 }
       },
       "extra_args": ["--overlap", "512", "--cell_size", "0.2"]
     },
@@ -44,7 +44,7 @@
       "enabled": true,
       "script_path": "prediction_models/building_predict.py",
       "output_path": "Results/amenity_pipeline/buildings.geojson",
-      "extra_args": ["--threshold", "0.96", "--overlap", "256", "--cell_size", "0.3", "--regularize"]
+      "extra_args": ["--threshold", "0.90", "--overlap", "256", "--cell_size", "0.3"]
     },
     {
       "name": "cars",
@@ -61,11 +61,11 @@
       "python_interpreter": "C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\Scripts\\propy.bat",
       "is_multiclass": true,
       "classes": {
-        "1": { "name": "Water",               "threshold": 0.50 },
+        "1": { "name": "Water",               "threshold": 0.60 },
         "2": { "name": "Wetlands",            "threshold": 0.50 },
-        "3": { "name": "Tree Canopy",         "threshold": 0.55 },
+        "3": { "name": "Tree Canopy",         "threshold": 0.45 },
         "4": { "name": "Shrubland",           "threshold": 0.50 },
-        "5": { "name": "Low Vegetation",      "threshold": 0.30 },
+        "5": { "name": "Low Vegetation",      "threshold": 0.27 },
         "6": { "name": "Barren",              "threshold": 0.50 },
         "7": { "name": "Structures",          "threshold": 0.78 },
         "8": { "name": "Impervious Surfaces", "threshold": 0.50 },
@@ -81,18 +81,24 @@
     "road_debug_alpha": 0.65
   },
 
-"_comment_final_classes": "Recalibrated for Pedestrian Functionality. Weights determine activity classification (Sitting vs. Walking vs. Dead Zone). Radius handles spatial accessibility halo in pixels (1 px = 0.3m).",
+  "_comment_fusion": "Global fusion parameters used by mask_fusion.py. parking_road_dilation_px: how far (pixels) to dilate road signal when applying parking proximity constraint — set to 0 to disable. binary_fallback_conf: confidence assigned when no prob raster is available for a class.",
+  "fusion": {
+    "binary_fallback_conf": 0.50,
+    "parking_road_dilation_px": 50
+  },
+
+  "_comment_final_classes": "Recalibrated for Pedestrian Functionality. weight: comfort score contribution (+/-). radius: spatial halo in pixels (1px = 0.3m). fusion_conf: base confidence multiplier for LC-derived-only classes competing in argmax. lc_source_weight: weight of the LC prob channel contribution (road, building, canopy, lowveg). ped_source_weight: weight of pedestrian model road channel fused into road_conf. veg_suppress_factor: multiplier applied to building_conf where LC says canopy/lowveg (suppresses false positives on sports fields and tree shadows).",
   "final_classes": {
-    "water":      { "weight":  0.15, "radius":  40 },
-    "canopy":     { "weight":  0.55, "radius": 80 },
-    "lowveg":     { "weight":  0.40, "radius": 40 },
-    "impervious": { "weight": -0.15, "radius":  16 },
-    "road":       { "weight": -0.35, "radius": 24 },
-    "parking":    { "weight": -0.25, "radius": 30 },
-    "building":   { "weight":  -0.05, "radius":  0 },
-    "sidewalk":   { "weight":  0.45, "radius": 60 },
-    "crosswalk":  { "weight":  0.25, "radius": 30 },
-    "car":        { "weight": -0.15, "radius": 16 },
-    "pool":       { "weight":  0.30, "radius": 20 }
+    "water":      { "weight":  0.15, "radius":  40, "fusion_conf": 0.80 },
+    "canopy":     { "weight":  0.55, "radius":  80, "fusion_conf": 0.75, "lc_source_weight": 0.72 },
+    "lowveg":     { "weight":  0.40, "radius":  40, "fusion_conf": 0.50, "lc_source_weight": 0.58 },
+    "impervious": { "weight": -0.15, "radius":  16, "fusion_conf": 0.55 },
+    "road":       { "weight": -0.35, "radius":  24, "lc_source_weight": 0.60, "ped_source_weight": 0.70 },
+    "parking":    { "weight": -0.25, "radius":  30 },
+    "building":   { "weight": -0.05, "radius":   0, "lc_source_weight": 0.58, "veg_suppress_factor": 0.25 },
+    "sidewalk":   { "weight":  0.45, "radius":  60 },
+    "crosswalk":  { "weight":  0.25, "radius":  30 },
+    "car":        { "weight": -0.15, "radius":  16 },
+    "pool":       { "weight":  0.30, "radius":  20 }
   }
 }

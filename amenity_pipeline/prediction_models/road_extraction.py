@@ -134,7 +134,7 @@ def run_tiled_prediction(model, image_path, threshold, overlap, cell_size, devic
     pred_mask = np.zeros((h, w), dtype=np.uint8)
     pred_mask[avg_probs >= threshold] = 1
     
-    return pred_mask, tx, crs
+    return pred_mask, avg_probs, tx, crs
 
 def mask_to_geojson(pred_mask, transform, crs, output_path):
     """Vectorizes the binary road array into spatial geometries."""
@@ -196,11 +196,30 @@ def main():
 
     try:
         model = load_model(args.emd, device)
-        pred_mask, transform, crs = run_tiled_prediction(
+        pred_mask, avg_probs, transform, crs = run_tiled_prediction(
             model, args.image, args.threshold, args.overlap, args.cell_size, device
         )
         
         os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+
+        # Save probability raster for confidence-based fusion
+        try:
+            prob_output_path = args.output.replace(".geojson", ".prob.tif")
+            with rasterio.open(
+                prob_output_path, "w",
+                driver="GTiff",
+                height=avg_probs.shape[0], width=avg_probs.shape[1],
+                count=1,
+                dtype=rasterio.float32,
+                crs=crs,
+                transform=transform,
+                compress="lzw"
+            ) as dst:
+                dst.write(avg_probs.astype(np.float32), 1)
+            print(f"[Roads] Probability raster saved to: {prob_output_path}")
+        except Exception as prob_err:
+            print(f"[Roads] WARNING: Could not save probability raster: {prob_err}")
+
         mask_to_geojson(pred_mask, transform, crs, args.output)
         
         print("[+] Road prediction pipeline complete.")

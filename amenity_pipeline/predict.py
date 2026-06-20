@@ -319,10 +319,107 @@ def run_pipeline(config_path, image_override=None):
             print(f"[Fusion]   {k}: {v.sum()} pixels")
 
         # ----------------------------------------------------------------
-        # Step 4: Run the matrix fusion AND comfort ecosystem generation
+        # Step 4: Load probability rasters for confidence-based fusion
+        # Each model saves a .prob.tif alongside its .geojson output.
+        # We load them here and pass to fuse_urban_masks as prob_maps.
+        # ----------------------------------------------------------------
+        def load_prob_tif(path, expected_h, expected_w, expected_tx, label):
+            """
+            Load a float32 GeoTIFF probability raster and resample it to the
+            reference grid if necessary. Returns None (with a warning) on failure.
+            """
+            if not path or not os.path.exists(path):
+                print(f"[Fusion] WARNING: Probability raster not found for '{label}': {path}")
+                print(f"[Fusion]   Falling back to binary mask for '{label}' in confidence fusion.")
+                return None
+            try:
+                with rasterio.open(path) as src:
+                    if src.count == 1:
+                        data = src.read(1, out_shape=(expected_h, expected_w),
+                                        resampling=Resampling.bilinear).astype(np.float32)
+                    else:
+                        # Multi-band: return all bands as (bands, H, W)
+                        data = src.read(
+                            out_shape=(src.count, expected_h, expected_w),
+                            resampling=Resampling.bilinear
+                        ).astype(np.float32)
+                return data
+            except Exception as e:
+                print(f"[Fusion] WARNING: Failed to load probability raster for '{label}': {e}")
+                print(f"[Fusion]   Falling back to binary mask for '{label}' in confidence fusion.")
+                return None
+
+        def prob_path(geojson_output_path):
+            return geojson_output_path.replace(".geojson", ".prob.tif") if geojson_output_path else None
+
+        print("[Fusion] Loading probability rasters for confidence-based fusion...")
+        prob_maps = {}
+
+        parking_prob = load_prob_tif(
+            prob_path(executed_outputs.get("parking_lots")),
+            ref_h, ref_w, ref_tx, "parking"
+        )
+        if parking_prob is not None:
+            prob_maps["parking"] = parking_prob
+
+        road_prob = load_prob_tif(
+            prob_path(executed_outputs.get("high_res_roads")),
+            ref_h, ref_w, ref_tx, "road"
+        )
+        if road_prob is not None:
+            prob_maps["road"] = road_prob
+
+        ped_prob = load_prob_tif(
+            prob_path(executed_outputs.get("pedestrian_infrastructure")),
+            ref_h, ref_w, ref_tx, "pedestrian"
+        )
+        if ped_prob is not None:
+            # Shape (3, H, W): band 0=sidewalk, band 1=ped_road, band 2=crosswalk
+            prob_maps["sidewalk"]  = ped_prob[0]
+            prob_maps["crosswalk"] = ped_prob[2]
+            prob_maps["ped_road"]  = ped_prob[1]
+
+        building_prob = load_prob_tif(
+            prob_path(executed_outputs.get("buildings")),
+            ref_h, ref_w, ref_tx, "buildings"
+        )
+        if building_prob is None:
+            # Try regularized output path
+            bldg_reg_geojson = executed_outputs.get("buildings", "").replace(".geojson", "_reg.geojson")
+            building_prob = load_prob_tif(
+                prob_path(bldg_reg_geojson) if bldg_reg_geojson else None,
+                ref_h, ref_w, ref_tx, "buildings_reg"
+            )
+        if building_prob is not None:
+            prob_maps["building"] = building_prob
+
+        lc_prob = load_prob_tif(
+            prob_path(executed_outputs.get("land_cover")),
+            ref_h, ref_w, ref_tx, "land_cover"
+        )
+        if lc_prob is not None:
+            # Multi-band LC raster: band N = LC class N (1-indexed), shape (9, H, W)
+            # LC classes: 1-2=Water/Wetlands, 3=Tree Canopy, 4=Shrubland, 5=Low Veg,
+            #             6=Barren, 7=Structures, 8=Impervious Surfaces, 9=Impervious Roads
+            if lc_prob.ndim == 3 and lc_prob.shape[0] >= 9:
+                prob_maps["lc_water"]      = np.maximum(lc_prob[0], lc_prob[1])  # bands 1+2 → Water/Wetlands (max)
+                prob_maps["lc_canopy"]     = lc_prob[2]   # band 3 → Tree Canopy
+                prob_maps["lc_lowveg"]     = np.maximum(lc_prob[3], lc_prob[4])  # bands 4+5 → Shrubland/Low Veg (max)
+                prob_maps["lc_building"]   = lc_prob[6]   # band 7 → Structures
+                prob_maps["lc_impervious"] = lc_prob[7]   # band 8 → Impervious Surfaces
+                prob_maps["lc_road"]       = lc_prob[8]   # band 9 → Impervious Roads
+            else:
+                print(f"[Fusion] WARNING: Land cover prob raster has unexpected shape {lc_prob.shape}. Skipping LC bands.")
+
+
+        print(f"[Fusion] Available prob maps: {list(prob_maps.keys())}")
+
+        # ----------------------------------------------------------------
+        # Step 5: Run the matrix fusion AND comfort ecosystem generation
         # ----------------------------------------------------------------
         print("[Fusion] Running fuse_urban_masks...")
-        clean_unified_map = fuse_urban_masks(lc_array, vector_masks_payload, cfg=pipeline_cfg)
+        clean_unified_map = fuse_urban_masks(lc_array, vector_masks_payload, cfg=pipeline_cfg, prob_maps=prob_maps)
+
         print(f"[Fusion] Fused map unique values: {np.unique(clean_unified_map).tolist()}")
 
         print("[Fusion] Generating comfort score heatmap...")
