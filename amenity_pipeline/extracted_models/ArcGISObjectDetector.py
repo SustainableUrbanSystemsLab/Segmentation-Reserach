@@ -1,5 +1,5 @@
 
-import json
+import json,sys,cv2
 
 import os, importlib
 
@@ -105,6 +105,7 @@ class ArcGISObjectDetector:
 
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         device = None
+        device_id = None
         if "device" in kwargs:
             device = kwargs["device"]
             if device == -2:
@@ -121,11 +122,22 @@ class ArcGISObjectDetector:
                 torch.cuda.set_device(device)
                 arcpy.env.processorType = "GPU"
                 arcpy.env.gpuId = str(device)
+                device_id = device
             else:
                 arcpy.env.processorType = "CPU"
+                device_id = "cpu"
 
         self.child_object_detector = ChildModelDetector()
         self.child_object_detector.initialize(model, model_as_file)
+        prf_root_dir = os.path.join(os.path.dirname(__file__), 'segment-anything')
+        if sys.path[0] != prf_root_dir:
+            sys.path.insert(0, prf_root_dir)
+        from segment_anything import sam_model_registry, SamPredictor
+        sam_checkpoint =  os.path.join(prf_root_dir, "models/sam_vit_b_01ec64.pth")#sam_vit_l_0b3195.pth"
+        model_type = "vit_b"
+        sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+        sam.to(device=device_id)
+        self.predictor = SamPredictor(sam)
 
     def getParameterInfo(self):
         required_parameters = [
@@ -154,16 +166,6 @@ class ArcGISObjectDetector:
         parameter_info = self.child_object_detector.getParameterInfo(
             required_parameters
         )
-        for idx, item in enumerate(parameter_info):
-            if 'batch_size' in item['name']:
-                parameter_info[idx] = {
-                    "name": "batch_size",
-                    "dataType": "GPLong",
-                    "required": False,
-                    "value": 4,
-                    "displayName": "Batch Size",
-                    "description": "Number of image tiles processed in each step of the model inference. This depends on the memory of your graphic card.",
-                }
         parameter_info.extend(
             [
                 {
@@ -176,7 +178,19 @@ class ArcGISObjectDetector:
                     else str(self.json_info["test_time_augmentation"]),
                     "displayName": "Test Time Augmentation",
                     "description": "Performs test time augmentation while predicting. If true, predictions of flipped and rotated variants of the input image will be merged into the final output.",
-                }
+                },
+                {
+                    "name": "prompt_type",
+                    "dataType": "GPString",
+                    "required": True,
+                    "domain": [
+                        "box",
+                        "center"
+                        ],
+                    "value": "center",
+                    "displayName": "Prompt Type",
+                    "description": "Box or center method to be used by SAM model for predicting masks.",
+                },
             ]
         )
         return parameter_info
@@ -194,6 +208,10 @@ class ArcGISObjectDetector:
             "y",
             "yes",
         ]
+        self.use_center  = scalars.get("prompt_type","box").lower() in [
+            "center",
+        ]
+        
         self.nms_overlap = float(scalars.get("nms_overlap", 0.1))
         return configuration
 
@@ -209,26 +227,62 @@ class ArcGISObjectDetector:
         raster_pixels = pixelBlocks["raster_pixels"]
         raster_pixels[np.where(raster_mask == 0)] = 0
         pixelBlocks["raster_pixels"] = raster_pixels
-
+        
         polygon_list, scores, classes = self.tta_detect_objects(**pixelBlocks)
-
-        features["features"] = []
-        for i in range(len(polygon_list)):
-            rings = [[]]
-            for j in range(polygon_list[i].shape[0]):
-                rings[0].append([polygon_list[i][j][1], polygon_list[i][j][0]])
-
-            features["features"].append(
-                {
-                    "attributes": {
-                        "OID": i + 1,
-                        "Class": self.json_info["Classes"][classes[i] - 1]["Name"],
-                        "Confidence": scores[i],
-                    },
-                    "geometry": {"rings": rings},
+        
+        mask_list = []
+        score_list = []
+        class_list = []
+        if polygon_list:
+            for pidx,pgn in enumerate(polygon_list):
+                self.predictor.set_image(np.moveaxis(raster_pixels,0,-1))
+                pgn+=self.child_object_detector.padding
+                pa = int(pgn[0][1]),int(pgn[0][0])
+                pb = int(pgn[2][1]),int(pgn[2][0])
+                width = pb[0] - pa[0]
+                height = pb[1] - pa[1]
+                area_box = width*height
+                if self.use_center:
+                    center_x = int((pa[0] + pb[0]) / 2)
+                    center_y = int((pa[1] + pb[1]) / 2)
+                    masks, _, _ = self.predictor.predict(point_coords=np.array([[center_x,center_y]]),point_labels=np.array([1]),multimask_output=False)
+                else:
+                    sambox = pa+pb
+                    masks, _, _ = self.predictor.predict(box=np.array(sambox),multimask_output=False)
+                    
+                masked_img = masks[0]*1
+                contours, hierarchy = cv2.findContours((masked_img).astype(np.uint8),
+                                                    cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE,
+                                                    offset=(0, 0))
+                contours = list(contours)                                   
+                sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+                for cont in sorted_contours:
+                    cont_area = cv2.contourArea(cont)
+                    if cont_area > area_box*0.05: 
+                        cont_mask = np.moveaxis(cont,1,0)
+                        cont_mask[0][:, 0] = cont_mask[0][:, 0] -self.child_object_detector.padding
+                        cont_mask[0][:, 1] = cont_mask[0][:, 1] -self.child_object_detector.padding
+                        cont_mask_list = cont_mask.tolist()
+                        mask_list.append(cont_mask_list)
+                        score_list.append(scores[pidx])
+                        class_list.append(classes[pidx])
+                
+                
+                
+        features['features'] = []
+        
+        for mask_idx, mask in enumerate(mask_list):
+            features['features'].append({
+                'attributes': {
+                    'OID': mask_idx + 1,
+                    'Class': self.json_info["Classes"][class_list[mask_idx] - 1]["Name"],
+                    'Confidence': score_list[mask_idx]
+                },
+                'geometry': {
+                    'rings': mask
                 }
-            )
-
+        })
+        
         return {"output_vectors": json.dumps(features)}
 
     def tta_detect_objects(self, **pixelBlocks):

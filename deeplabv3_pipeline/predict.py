@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.iou_comparator import compare_annotation_iou
+from GroundingSAMpipeline.models.iou_comparator import compare_annotation_iou
 from yoloseg_pipeline.common import CLASS_NAMES, PROJECT_ROOT, load_rgb_from_tif
 
 NUM_CLASSES = len(CLASS_NAMES)
@@ -97,18 +97,24 @@ def load_model(weights_path: Path, device: torch.device) -> torch.nn.Module:
 
 
 def _tile_ranges(length: int, tile_size: int, overlap: int) -> list[tuple[int, int]]:
+    """Generate tile coordinates, safely stepping back to avoid edge-clipping."""
     if length <= tile_size:
         return [(0, length)]
+        
     step = max(1, tile_size - overlap)
     ranges: list[tuple[int, int]] = []
     start = 0
-    while start < length:
-        end = min(length, start + tile_size)
-        ranges.append((start, end))
-        if end >= length:
-            break
+    
+    while start < length - tile_size:
+        ranges.append((start, start + tile_size))
         start += step
-    return ranges
+        
+    # Force the final tile to snap to the right/bottom edge perfectly,
+    # guaranteeing no non-square crops that would get deformed.
+    ranges.append((length - tile_size, length))
+    
+    # Remove duplicates if step perfectly aligns with the edge
+    return list(dict.fromkeys(ranges))
 
 
 def _preprocess_chip(chip: np.ndarray, imgsz: int, device: torch.device) -> torch.Tensor:
@@ -127,16 +133,12 @@ def predict_tiled(
     imgsz: int,
     device: torch.device,
 ) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
-    """Run sliding-window inference and stitch softmax probabilities.
-
-    Overlapping regions are averaged in probability space before taking
-    argmax, which produces smoother seams than hard-voting.
-    """
+    """Run sliding-window inference and stitch softmax probabilities."""
     height, width = rgb.shape[:2]
 
-    # Accumulate softmax probabilities + counts for overlap averaging
-    prob_sum = np.zeros((NUM_CLASSES, height, width), dtype=np.float64)
-    count_map = np.zeros((height, width), dtype=np.float64)
+    # Use float32 to prevent massive RAM overhead on gigapixel images
+    prob_sum = np.zeros((NUM_CLASSES, height, width), dtype=np.float32)
+    count_map = np.zeros((height, width), dtype=np.float32)
 
     y_ranges = _tile_ranges(height, tile_size, overlap)
     x_ranges = _tile_ranges(width, tile_size, overlap)
@@ -152,11 +154,14 @@ def predict_tiled(
                 input_tensor = _preprocess_chip(chip, imgsz, device)
 
                 with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-                    output = model(input_tensor)["out"]
+                    # SMP models return the tensor directly, not an OrderedDict
+                    output = model(input_tensor)
 
                 # Resize logits back to chip spatial dimensions
                 logits = F.interpolate(output, size=(chip_h, chip_w), mode="bilinear", align_corners=False)
-                probs = F.softmax(logits, dim=1).squeeze(0).cpu().numpy()  # [C, chip_h, chip_w]
+                
+                # Safely cast to float() before cpu().numpy() to avoid float16 accumulation errors
+                probs = F.softmax(logits, dim=1).squeeze(0).float().cpu().numpy()
 
                 prob_sum[:, y0:y1, x0:x1] += probs
                 count_map[y0:y1, x0:x1] += 1.0
@@ -180,6 +185,39 @@ def predict_tiled(
 # --------------------------------------------------
 # Post-processing
 # --------------------------------------------------
+
+from scipy.ndimage import label
+
+def _remove_noise(
+    class_masks: dict[str, np.ndarray], 
+    min_size: int = 256
+) -> tuple[dict[str, np.ndarray], np.ndarray]:
+    """Removes isolated pixel clusters smaller than min_size (fixes TV static)."""
+    cleaned_masks = {}
+    
+    # Grab dimensions to reconstruct the map
+    height, width = next(iter(class_masks.values())).shape
+    cleaned_map = np.zeros((height, width), dtype=np.uint8)
+    
+    for idx, (name, mask) in enumerate(class_masks.items()):
+        # Find contiguous blobs of pixels
+        labeled_mask, num_features = label(mask)
+        if num_features == 0:
+            cleaned_masks[name] = mask
+            continue
+            
+        # Count pixels in each blob
+        sizes = np.bincount(labeled_mask.ravel())
+        sizes[0] = 0  # Ignore the background size
+        
+        # Keep only blobs larger than min_size
+        valid_labels = np.where(sizes >= min_size)[0]
+        cleaned_mask = np.isin(labeled_mask, valid_labels)
+        
+        cleaned_masks[name] = cleaned_mask
+        cleaned_map[cleaned_mask] = idx + 1
+        
+    return cleaned_masks, cleaned_map
 
 
 def _fill_best_guess(
@@ -225,7 +263,7 @@ def _save_preview(
 ) -> None:
     color_lookup = np.array(
         [
-            [0, 0, 0],        # 0 = no prediction
+            [0, 0, 0],         # 0 = no prediction
             [26, 122, 26],     # NEN_A
             [125, 200, 125],   # NEN_B
             [245, 208, 32],    # NEN_C
@@ -341,6 +379,9 @@ def _process_source(
     class_masks, class_map, best_conf = predict_tiled(
         model, rgb, args.tile_size, args.tile_overlap, args.imgsz, device
     )
+    # Clean up small isolated pixel clusters (TV static)
+    # (Adjust the min_size up or down depending on how large your real features are)
+    class_masks, class_map = _remove_noise(class_masks, min_size=256)
 
     if args.force_best_guess:
         class_masks, class_map, best_conf = _fill_best_guess(class_masks, class_map, best_conf)
@@ -381,6 +422,14 @@ def _process_source(
             }
         )
 
+        # --- NEW: Print per-class metrics to console ---
+        print(f"\n  [EVALUATION] mIoU: {float(comparison.get('mean_iou', 0.0)):.4f} | Pixel Acc: {float(comparison.get('pixel_accuracy', 0.0)):.4f}")
+        
+        class_ious = comparison.get("class_iou", {})
+        if class_ious:
+            print("  Per-Class IoU:")
+            for cls_name, iou_val in class_ious.items():
+                print(f"    - {cls_name}: {iou_val:.4f}")
     # Build preview
     footer_lines = None
     if report.get("mean_iou") is not None and report.get("pixel_accuracy") is not None:

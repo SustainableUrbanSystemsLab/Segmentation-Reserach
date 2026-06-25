@@ -1,0 +1,12 @@
+{
+  "_comment": "Default inference configuration for the YOLOv11 wind comfort segmentation pipeline.",
+  "_comment_force_best_guess": "Fills background/uncovered pixels with the nearest predicted class via distance transform. Prevents large unassigned holes in the output map.",
+  "_comment_imgsz": "Must match the imgsz used during training (currently 1280). Changing this will cause a receptive-field mismatch and degrade accuracy.",
+
+  "imgsz": 1280,
+  "conf": 0.25,
+  "fallback_conf": 0.001,
+  "tile_size": 1280,
+  "tile_overlap": 128,
+  "force_best_guess": true
+}

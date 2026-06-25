@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.iou_comparator import compare_annotation_iou
+from GroundingSAMpipeline.models.iou_comparator import compare_annotation_iou
 
 from yoloseg_pipeline.common import CLASS_NAMES, PROJECT_ROOT, load_rgb_from_tif
 
@@ -40,24 +40,29 @@ PREVIEW_MAX_DIM = 1200
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run YOLOv11 segmentation inference on a tif or folder of tifs.")
+    parser.add_argument(
+        "--config",
+        default=str(Path(__file__).resolve().parent / "predict_config.json"),
+        help="Path to a JSON config file with default inference settings.",
+    )
     parser.add_argument("--weights", required=True, help="Path to a trained YOLO segmentation checkpoint.")
     parser.add_argument("--source", required=True, help="A tif file or a folder containing tif files.")
     parser.add_argument("--output-dir", default=str(PROJECT_ROOT / "results" / "yoloseg_predictions"))
-    parser.add_argument("--imgsz", type=int, default=1280)
-    parser.add_argument("--conf", type=float, default=0.25)
+    parser.add_argument("--imgsz", type=int, default=None)
+    parser.add_argument("--conf", type=float, default=None)
     parser.add_argument(
         "--fallback-conf",
         type=float,
-        default=0.001,
+        default=None,
         help="Lower confidence used once if the initial pass returns no masks.",
     )
-    parser.add_argument("--tile-size", type=int, default=1024)
-    parser.add_argument("--tile-overlap", type=int, default=128)
+    parser.add_argument("--tile-size", type=int, default=None)
+    parser.add_argument("--tile-overlap", type=int, default=None)
     parser.add_argument("--annotation-path", default=None, help="Optional annotation JSON/XML for IoU evaluation.")
     parser.add_argument(
         "--force-best-guess",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
         help="Fill any remaining background pixels with the nearest predicted class.",
     )
     return parser.parse_args()
@@ -115,10 +120,21 @@ def _predict_tiled(
 
     y_ranges = _tile_ranges(height, tile_size, overlap)
     x_ranges = _tile_ranges(width, tile_size, overlap)
+    
+    total_patches = len(y_ranges) * len(x_ranges)
+    print(f"   [Processing] Slicing layout into {total_patches} localized sub-patches ({len(y_ranges)}x{len(x_ranges)})...")
 
     # 3. Slide windows across the map matrix
+    patch_idx = 0
+    milestones = [int(total_patches * pct) for pct in [0.25, 0.50, 0.75, 1.00]]
+    
     for y0, y1 in y_ranges:
         for x0, x1 in x_ranges:
+            patch_idx += 1
+            if patch_idx in milestones:
+                pct_done = int((patch_idx / total_patches) * 100)
+                print(f"   [Progress] {patch_idx}/{total_patches} patches processed ({pct_done}% done)...")
+
             chip = rgb[y0:y1, x0:x1]
             if chip.size == 0:
                 continue
@@ -291,6 +307,7 @@ def _to_iou_class_masks(class_masks: dict[str, np.ndarray]) -> dict[str, np.ndar
 
 
 def _process_source(model: YOLO, source: Path, args: argparse.Namespace, output_dir: Path) -> dict[str, object]:
+    print(f"\n--> Starting inference pipeline on tile target: {source.name}")
     rgb = load_rgb_from_tif(source)
     effective_tile_size = _effective_tile_size(args.tile_size, args.imgsz)
     if effective_tile_size != args.tile_size:
@@ -332,6 +349,7 @@ def _process_source(model: YOLO, source: Path, args: argparse.Namespace, output_
 
     annotation_path = _annotation_path_for_source(source, args.annotation_path)
     if annotation_path is not None:
+        print(f"   [Eval] Ground-truth reference detected. Running IoU comparison matrices...")
         comparison = compare_annotation_iou(
             image_name=source.name,
             predicted_masks=_to_iou_class_masks(class_masks),
@@ -355,8 +373,6 @@ def _process_source(model: YOLO, source: Path, args: argparse.Namespace, output_
         ]
 
     preview_stride = _preview_stride(rgb.shape)
-    if preview_stride > 1:
-        print(f"[INFO] Downsampling preview by stride={preview_stride} to match combined-mask display sizing")
     preview_rgb = rgb[::preview_stride, ::preview_stride]
     preview_class_map = class_map[::preview_stride, ::preview_stride]
 
@@ -369,17 +385,92 @@ def _process_source(model: YOLO, source: Path, args: argparse.Namespace, output_
 
 def main() -> int:
     args = _parse_args()
+
+    # --------------------------------------------------
+    # Load predict_config.json defaults (CLI flags override)
+    # --------------------------------------------------
+    config_file = Path(args.config)
+    if config_file.exists():
+        print(f"--> Loading predict config: {config_file}")
+        with open(config_file, "r") as f:
+            config_data = json.load(f)
+        ignored_config_keys = {k for k in config_data if k.startswith("_")}
+        for key, value in config_data.items():
+            if key in ignored_config_keys:
+                continue
+            arg_key = key.replace("-", "_")
+            # Only apply config value if the CLI left the argument at its default (None)
+            if getattr(args, arg_key, None) is None:
+                setattr(args, arg_key, value)
+
+    # Apply hard-coded fallbacks for any value still None after config load
+    if args.imgsz is None:
+        args.imgsz = 1280
+    if args.conf is None:
+        args.conf = 0.25
+    if args.fallback_conf is None:
+        args.fallback_conf = 0.001
+    if args.tile_size is None:
+        args.tile_size = 1280
+    if args.tile_overlap is None:
+        args.tile_overlap = 128
+    if args.force_best_guess is None:
+        args.force_best_guess = False
+
     model = YOLO(args.weights)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    sources = _iter_sources(Path(args.source))
+    print(f"[INFO] Found {len(sources)} image tile files to pass through evaluation pipeline.")
+
     reports = []
-    for source in _iter_sources(Path(args.source)):
+    for source in sources:
         reports.append(_process_source(model, source, args, output_dir))
 
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(reports, indent=2, default=str), encoding="utf-8")
-    print(f"[INFO] Wrote YOLO predictions to: {output_dir}")
+    print(f"\n[INFO] Wrote detailed YOLO predictions to layout directory: {output_dir}")
+
+    # --------------------------------------------------
+    # Global Accuracy Report Aggregation Block
+    # --------------------------------------------------
+    valid_evals = [r for r in reports if r.get("pixel_accuracy") is not None]
+    
+    if valid_evals:
+        print("\n" + "="*65)
+        print("                 GLOBAL EVALUATION METRICS SUMMARY               ")
+        print("="*65)
+        
+        # Calculate macro averages across all evaluated tiles
+        avg_pix_acc = np.mean([float(r["pixel_accuracy"]) for r in valid_evals])
+        avg_mean_iou = np.mean([float(r["mean_iou"]) for r in valid_evals])
+        
+        print(f"  Overall Pixel Accuracy: {avg_pix_acc:.4f} ({avg_pix_acc*100:.2f}%)")
+        print(f"  Overall Mean IoU (mIoU): {avg_mean_iou:.4f}")
+        print("-"*65)
+        print(f"  {'Category Name':<20} | {'Internal Class Key':<20} | {'Avg IoU':<10}")
+        print("-"*65)
+        
+        for pred_class, iou_key in PRED_TO_IOU_CLASS_NAMES.items():
+            class_ious = []
+            for r in valid_evals:
+                # Dynamically extract standard metric patterns from the dynamic comparison mapping
+                metric_name = f"{iou_key}_iou"
+                if metric_name in r:
+                    class_ious.append(float(r[metric_name]))
+                elif "class_ious" in r and iou_key in r["class_ious"]:
+                    class_ious.append(float(r["class_ious"][iou_key]))
+            
+            if class_ious:
+                avg_class_iou = np.mean(class_ious)
+                print(f"  {pred_class:<20} | {iou_key:<20} | {avg_class_iou:.4f}")
+            else:
+                print(f"  {pred_class:<20} | {iou_key:<20} | N/A")
+        print("="*65 + "\n")
+    else:
+        print("\n[INFO] Skipped printing evaluation matrix table: No matching ground-truth annotations found.")
+
     return 0
 
 

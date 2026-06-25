@@ -306,3 +306,75 @@ def build_amenity_heatmap(
     np.clip(heatmap, 0.0, 1.0, out=heatmap)
 
     return heatmap, cell_px_w, cell_px_h, side_m
+
+
+def compose_visualization_with_side_panel(
+    base_img,
+    title: str,
+    legend_rows: list[tuple[str, np.ndarray | list[float] | tuple[float, float, float]]] | None = None,
+    gradient_cmap=None,
+    gradient_low_label: str = "Low score",
+    gradient_high_label: str = "High score",
+    footer_lines: list[str] | None = None,
+    panel_width: int = 280,
+):
+    """Add a title and either categorical or gradient legend in a right-side panel."""
+    from PIL import Image as PILImage
+    from PIL import ImageDraw, ImageFont
+
+    img = base_img.copy().convert("RGBA")
+    font = ImageFont.load_default()
+    pad = 14
+    panel_x = img.width + pad * 2
+    canvas_width = img.width + panel_width + pad * 3
+    canvas_height = max(img.height + pad * 2, 260)
+    canvas = PILImage.new("RGBA", (canvas_width, canvas_height), (16, 16, 18, 255))
+    canvas.paste(img, (pad, pad))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle(
+        (panel_x - 10, pad - 6, canvas_width - pad, canvas_height - pad),
+        radius=12,
+        fill=(0, 0, 0, 160),
+        outline=(255, 255, 255, 180),
+        width=1,
+    )
+
+    title_bbox = draw.textbbox((0, 0), title, font=font)
+    title_h = title_bbox[3] - title_bbox[1]
+    draw.text((panel_x, pad), title, font=font, fill=(255, 255, 255, 255))
+    cursor_y = pad + title_h + 12
+
+    if legend_rows:
+        box_size = 14
+        row_gap = 8
+        text_gap = 8
+        for label, color in legend_rows:
+            color_rgb = tuple(int(round(float(c) * 255)) for c in color)
+            draw.rectangle((panel_x, cursor_y + 1, panel_x + box_size, cursor_y + 1 + box_size), fill=color_rgb, outline=(255, 255, 255, 220))
+            draw.text((panel_x + box_size + text_gap, cursor_y), label, font=font, fill=(255, 255, 255, 255))
+            cursor_y += box_size + row_gap
+    elif gradient_cmap is not None:
+        bar_w = panel_width - 30
+        bar_h = 20
+        grad = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+        grad_rgba = (gradient_cmap(grad) * 255).astype(np.uint8)[None, :, :]
+        resampling = getattr(getattr(PILImage, "Resampling", PILImage), "BILINEAR", PILImage.BILINEAR)
+        grad_img = PILImage.fromarray(grad_rgba, mode="RGBA").resize((bar_w, bar_h), resample=resampling)
+        canvas.paste(grad_img, (panel_x, cursor_y), grad_img)
+        cursor_y += bar_h + 8
+        draw.text((panel_x, cursor_y), gradient_low_label, font=font, fill=(255, 255, 255, 255))
+        high_bbox = draw.textbbox((0, 0), gradient_high_label, font=font)
+        draw.text((panel_x + bar_w - (high_bbox[2] - high_bbox[0]), cursor_y), gradient_high_label, font=font, fill=(255, 255, 255, 255))
+
+    if footer_lines:
+        cursor_y += 16
+        draw.line((panel_x, cursor_y, canvas_width - pad - 8, cursor_y), fill=(255, 255, 255, 120), width=1)
+        cursor_y += 12
+        for line in footer_lines:
+            draw.text((panel_x, cursor_y), line, font=font, fill=(255, 255, 255, 255))
+            line_bbox = draw.textbbox((0, 0), line, font=font)
+            cursor_y += (line_bbox[3] - line_bbox[1]) + 6
+
+    return canvas
+

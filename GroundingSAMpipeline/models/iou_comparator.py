@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from preprocessing import build_cleaned_annotation_mask
+from preprocessing.cvat_mask_cleanup import build_cleaned_annotation_mask
 
 
 GROUPED_CLASS_ORDER = ("nen_cat_a", "nen_cat_c", "nen_cat_e")

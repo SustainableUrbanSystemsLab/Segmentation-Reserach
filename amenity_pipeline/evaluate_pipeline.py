@@ -72,6 +72,8 @@ _PRED_CLASS_TO_TIER = {
     FinalClass.CROSSWALK:  0,
     FinalClass.CAR:        2,
     FinalClass.POOL:       1,   # neutral
+    FinalClass.SEATING:    0,   # comfortable
+    FinalClass.GARDEN:     0,   # comfortable
 }
 
 _TIER_LABELS = {0: "Comfortable (A)", 1: "Neutral (B)", 2: "Mild (C/D)", 3: "Uncomfortable (D/E)"}
@@ -145,6 +147,8 @@ def colorize_pred(pred: np.ndarray) -> np.ndarray:
         FinalClass.CROSSWALK:  [229, 125,  33],
         FinalClass.CAR:        [51,  150, 219],
         FinalClass.POOL:       [224,  64, 250],
+        FinalClass.SEATING:    [153,  90,  38],
+        FinalClass.GARDEN:     [46,  139,  87],
     }
     for cls_id, rgb in CLASS_RGB.items():
         out[pred == cls_id] = rgb

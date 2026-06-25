@@ -111,8 +111,116 @@ def run_pipeline(config_path, image_override=None):
                 pass # Meta file corrupted or unreadable, force rerun
 
         if should_run:
-            print(f"Executing: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True)
+            # =========================================================================
+            # IMPLEMENTED: ON-THE-FLY SLICED INFERENCE PIPELINE LAYERING
+            # =========================================================================
+            import rasterio
+            from rasterio.windows import Window
+            import geopandas as gpd
+            import pandas as pd
+            import tempfile
+            import shutil
+            from rasterio.merge import merge as merge_rasters
+
+            PATCH_SIZE = 1536  # Safe resolution window size for GPU context
+            OVERLAP = 256      # Prevents edge-cut artifacts on fine classes (canopy/sidewalks)
+
+            with rasterio.open(resolved_image) as src:
+                img_w, img_h = src.width, src.height
+                img_meta = src.meta.copy()
+
+            # Skip windowing if image is already smaller than a single patch
+            if img_w > PATCH_SIZE or img_h > PATCH_SIZE:
+                print(f"[Sliced Inference] Detecting large megatile ({img_w}x{img_h}). Processing sliding window patches...")
+                temp_dir = tempfile.mkdtemp(prefix="pipeline_slices_")
+                patch_geojsons = []
+                patch_probs = []
+
+                try:
+                    with rasterio.open(resolved_image) as src:
+                        for y in range(0, img_h, PATCH_SIZE - OVERLAP):
+                            for x in range(0, img_w, PATCH_SIZE - OVERLAP):
+                                w = min(PATCH_SIZE, img_w - x)
+                                h = min(PATCH_SIZE, img_h - y)
+                                if w <= 0 or h <= 0:
+                                    continue
+
+                                win = Window(x, y, w, h)
+                                patch_transform = rasterio.windows.transform(win, src.transform)
+                                patch_data = src.read(window=win)
+
+                                # Write georeferenced sub-tile slice
+                                patch_img_path = os.path.join(temp_dir, f"slice_{x}_{y}.tif")
+                                sub_meta = img_meta.copy()
+                                sub_meta.update({"width": w, "height": h, "transform": patch_transform})
+                                
+                                with rasterio.open(patch_img_path, "w", **sub_meta) as dst:
+                                    dst.write(patch_data)
+
+                                # Match target patch outputs
+                                patch_out_geojson = os.path.join(temp_dir, f"slice_{x}_{y}.geojson")
+                                patch_out_prob = patch_out_geojson.replace(".geojson", ".prob.tif")
+
+                                # Construct custom patch execution args
+                                patch_cmd = []
+                                idx = 0
+                                while idx < len(cmd):
+                                    if cmd[idx] == "--image":
+                                        patch_cmd.extend(["--image", patch_img_path])
+                                        idx += 2
+                                    elif cmd[idx] == "--output":
+                                        patch_cmd.extend(["--output", patch_out_geojson])
+                                        idx += 2
+                                    else:
+                                        patch_cmd.append(cmd[idx])
+                                        idx += 1
+
+                                print(f"  -> Inferring slice window at Offset (X: {x}, Y: {y}) | Dim: {w}x{h}")
+                                subprocess.run(patch_cmd, check=True)
+
+                                if os.path.exists(patch_out_geojson):
+                                    patch_geojsons.append(patch_out_geojson)
+                                if os.path.exists(patch_out_prob):
+                                    patch_probs.append(patch_out_prob)
+
+                    # Vector Stitching Section
+                    if patch_geojsons:
+                        print(f"[Sliced Inference] Merging {len(patch_geojsons)} patch vector spaces into unified output...")
+                        gdfs = [gpd.read_file(p) for p in patch_geojsons if os.path.exists(p)]
+                        valid_gdfs = [g for g in gdfs if not g.empty]
+                        if valid_gdfs:
+                            merged_gdf = gpd.GeoDataFrame(pd.concat(valid_gdfs, ignore_index=True), crs=valid_gdfs[0].crs)
+                            merged_gdf.to_file(resolved_output, driver="GeoJSON")
+                        else:
+                            with open(resolved_output, "w") as f:
+                                json.dump({"type": "FeatureCollection", "features": []}, f)
+
+                    # Probability Raster Stitching Section
+                    if patch_probs:
+                        print(f"[Sliced Inference] Mosaicking split-probability array rasters...")
+                        opened_srcs = [rasterio.open(p) for p in patch_probs]
+                        mosaic, out_trans = merge_rasters(opened_srcs)
+                        
+                        out_prob_path = resolved_output.replace(".geojson", ".prob.tif")
+                        prob_meta = opened_srcs[0].meta.copy()
+                        prob_meta.update({
+                            "height": mosaic.shape[1],
+                            "width": mosaic.shape[2],
+                            "transform": out_trans
+                        })
+                        with rasterio.open(out_prob_path, "w", **prob_meta) as dst:
+                            dst.write(mosaic)
+                        
+                        for s in opened_srcs:
+                            s.close()
+
+                finally:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+
+            else:
+                print(f"Executing standard macro inference: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True)
+
             # Save state to cache
             with open(meta_path, "w") as mf:
                 json.dump(cache_payload, mf)
@@ -178,7 +286,7 @@ def run_pipeline(config_path, image_override=None):
                         gdf.crs = "EPSG:4326"
                     if crs_ref and gdf.crs != crs_ref:
                         gdf = gdf.to_crs(crs_ref)
-                return gdf
+                    return gdf
             except Exception as e:
                 print(f"[Fusion] Warning: could not load {path}: {e}")
             return None
@@ -265,6 +373,7 @@ def run_pipeline(config_path, image_override=None):
         cars_gdf  = load_gdf(executed_outputs.get("cars"), crs)
         pools_gdf = load_gdf(executed_outputs.get("pools"), crs)
         parking_gdf = load_gdf(executed_outputs.get("parking_lots"), crs)
+        dino_gdf  = load_gdf(executed_outputs.get("dino_model"), crs)
         def rasterize_all(gdf, h, w, tx, crs_ref):
             if gdf is None or gdf.empty:
                 return np.zeros((h, w), dtype=np.uint8)
@@ -278,11 +387,6 @@ def run_pipeline(config_path, image_override=None):
             )
 
         print("[Fusion] Rasterizing vector layers...")
-        '''
-        print("\nEXECUTED OUTPUTS:")
-        for k, v in executed_outputs.items():
-            print(f"{k} -> {v}")
-        '''
         roads_gdf = load_gdf(executed_outputs.get("high_res_roads"), crs)  
 
         if ped_gdf is not None:
@@ -295,16 +399,12 @@ def run_pipeline(config_path, image_override=None):
         print("\nROAD GEOMETRY TYPES:")
         print(roads_gdf.geom_type.value_counts())
 
-        #Adjust building logic for higher accuracy
-        # 1. Rasterize the buildings normally first
+        # Adjust building logic for higher accuracy
         raw_building_mask = rasterize_all(bldg_gdf, ref_h, ref_w, ref_tx, crs)
 
-        # 2. Apply the 1-pixel binary erosion recommendation (clears a 0.3m edge bleed)
         print("[Fusion] Applying binary erosion to building footprints...")
         cleaned_building_mask = binary_erosion(raw_building_mask, iterations=1).astype(np.uint8)
 
-
-        # FIX: Align payload keys exactly with your JSON config and fusion lookups
         vector_masks_payload = {
             'sidewalk':        rasterize_class(ped_gdf,  "sidewalk",    ref_h, ref_w, ref_tx, crs),
             'ped_model_roads': rasterize_class(ped_gdf,  "road",        ref_h, ref_w, ref_tx, crs),
@@ -313,24 +413,19 @@ def run_pipeline(config_path, image_override=None):
             'cars':            rasterize_all(cars_gdf,                  ref_h, ref_w, ref_tx, crs),
             'pools':           rasterize_all(pools_gdf,                 ref_h, ref_w, ref_tx, crs),
             'high_res_roads':  rasterize_all(roads_gdf,                 ref_h, ref_w, ref_tx, crs),
-            'parking':         rasterize_all(parking_gdf,               ref_h, ref_w, ref_tx, crs)
+            'parking':         rasterize_all(parking_gdf,               ref_h, ref_w, ref_tx, crs),
+            'seating':         rasterize_class(dino_gdf, "seating",     ref_h, ref_w, ref_tx, crs),
+            'garden':          rasterize_class(dino_gdf, "garden",      ref_h, ref_w, ref_tx, crs)
         }
         for k, v in vector_masks_payload.items():
             print(f"[Fusion]   {k}: {v.sum()} pixels")
 
         # ----------------------------------------------------------------
         # Step 4: Load probability rasters for confidence-based fusion
-        # Each model saves a .prob.tif alongside its .geojson output.
-        # We load them here and pass to fuse_urban_masks as prob_maps.
         # ----------------------------------------------------------------
         def load_prob_tif(path, expected_h, expected_w, expected_tx, label):
-            """
-            Load a float32 GeoTIFF probability raster and resample it to the
-            reference grid if necessary. Returns None (with a warning) on failure.
-            """
             if not path or not os.path.exists(path):
                 print(f"[Fusion] WARNING: Probability raster not found for '{label}': {path}")
-                print(f"[Fusion]   Falling back to binary mask for '{label}' in confidence fusion.")
                 return None
             try:
                 with rasterio.open(path) as src:
@@ -338,7 +433,6 @@ def run_pipeline(config_path, image_override=None):
                         data = src.read(1, out_shape=(expected_h, expected_w),
                                         resampling=Resampling.bilinear).astype(np.float32)
                     else:
-                        # Multi-band: return all bands as (bands, H, W)
                         data = src.read(
                             out_shape=(src.count, expected_h, expected_w),
                             resampling=Resampling.bilinear
@@ -346,7 +440,6 @@ def run_pipeline(config_path, image_override=None):
                 return data
             except Exception as e:
                 print(f"[Fusion] WARNING: Failed to load probability raster for '{label}': {e}")
-                print(f"[Fusion]   Falling back to binary mask for '{label}' in confidence fusion.")
                 return None
 
         def prob_path(geojson_output_path):
@@ -374,7 +467,6 @@ def run_pipeline(config_path, image_override=None):
             ref_h, ref_w, ref_tx, "pedestrian"
         )
         if ped_prob is not None:
-            # Shape (3, H, W): band 0=sidewalk, band 1=ped_road, band 2=crosswalk
             prob_maps["sidewalk"]  = ped_prob[0]
             prob_maps["crosswalk"] = ped_prob[2]
             prob_maps["ped_road"]  = ped_prob[1]
@@ -384,7 +476,6 @@ def run_pipeline(config_path, image_override=None):
             ref_h, ref_w, ref_tx, "buildings"
         )
         if building_prob is None:
-            # Try regularized output path
             bldg_reg_geojson = executed_outputs.get("buildings", "").replace(".geojson", "_reg.geojson")
             building_prob = load_prob_tif(
                 prob_path(bldg_reg_geojson) if bldg_reg_geojson else None,
@@ -398,19 +489,26 @@ def run_pipeline(config_path, image_override=None):
             ref_h, ref_w, ref_tx, "land_cover"
         )
         if lc_prob is not None:
-            # Multi-band LC raster: band N = LC class N (1-indexed), shape (9, H, W)
-            # LC classes: 1-2=Water/Wetlands, 3=Tree Canopy, 4=Shrubland, 5=Low Veg,
-            #             6=Barren, 7=Structures, 8=Impervious Surfaces, 9=Impervious Roads
             if lc_prob.ndim == 3 and lc_prob.shape[0] >= 9:
-                prob_maps["lc_water"]      = np.maximum(lc_prob[0], lc_prob[1])  # bands 1+2 → Water/Wetlands (max)
-                prob_maps["lc_canopy"]     = lc_prob[2]   # band 3 → Tree Canopy
-                prob_maps["lc_lowveg"]     = np.maximum(lc_prob[3], lc_prob[4])  # bands 4+5 → Shrubland/Low Veg (max)
-                prob_maps["lc_building"]   = lc_prob[6]   # band 7 → Structures
-                prob_maps["lc_impervious"] = lc_prob[7]   # band 8 → Impervious Surfaces
-                prob_maps["lc_road"]       = lc_prob[8]   # band 9 → Impervious Roads
+                prob_maps["lc_water"]      = np.maximum(lc_prob[0], lc_prob[1])  
+                prob_maps["lc_canopy"]     = lc_prob[2]   
+                prob_maps["lc_lowveg"]     = np.maximum(lc_prob[3], lc_prob[4])  
+                prob_maps["lc_building"]   = lc_prob[6]   
+                prob_maps["lc_impervious"] = lc_prob[7]   
+                prob_maps["lc_road"]       = lc_prob[8]   
             else:
-                print(f"[Fusion] WARNING: Land cover prob raster has unexpected shape {lc_prob.shape}. Skipping LC bands.")
+                print(f"[Fusion] WARNING: Land cover prob raster has unexpected shape {lc_prob.shape}.")
 
+        dino_prob = load_prob_tif(
+            prob_path(executed_outputs.get("dino_model")),
+            ref_h, ref_w, ref_tx, "dino_model"
+        )
+        if dino_prob is not None:
+            if dino_prob.ndim == 3 and dino_prob.shape[0] >= 2:
+                prob_maps["garden"]  = dino_prob[0]
+                prob_maps["seating"] = dino_prob[1]
+            elif dino_prob.ndim == 2:
+                prob_maps["garden"] = dino_prob
 
         print(f"[Fusion] Available prob maps: {list(prob_maps.keys())}")
 
@@ -419,15 +517,13 @@ def run_pipeline(config_path, image_override=None):
         # ----------------------------------------------------------------
         print("[Fusion] Running fuse_urban_masks...")
         clean_unified_map = fuse_urban_masks(lc_array, vector_masks_payload, cfg=pipeline_cfg, prob_maps=prob_maps)
-
         print(f"[Fusion] Fused map unique values: {np.unique(clean_unified_map).tolist()}")
 
         print("[Fusion] Generating comfort score heatmap...")
-        from mask_fusion import generate_comfort_score_map
         comfort_heatmap = generate_comfort_score_map(clean_unified_map, pipeline_cfg)
 
         # ----------------------------------------------------------------
-        # Step 5: Write both the fused raster and the comfort heatmap
+        # Step 6: Write outputs
         # ----------------------------------------------------------------
         output_dir = os.path.join(REPO_ROOT, "Results")
         os.makedirs(output_dir, exist_ok=True)
@@ -464,6 +560,34 @@ def run_pipeline(config_path, image_override=None):
         print(f"[Fusion] Fused mask saved to: {fused_output_tiff}")
         print(f"[Fusion] Comfort heatmap saved to: {heatmap_output_tiff}")
 
+        # =========================================================================
+        # ADDED: GRANULAR PIPELINE DIAGNOSTICS & CATEGORY DISTRIBUTIONS
+        # =========================================================================
+        print("\n" + "=" * 60)
+        print("     GEOSPATIAL DIAGNOSTICS & CATEGORY COMPOSITION")
+        print("=" * 60)
+        u_classes, counts = np.unique(clean_unified_map, return_counts=True)
+        total_px = clean_unified_map.size
+        
+        print(f"Total Evaluated Array Pixels : {total_px:,}")
+        print(f"Target GSD Resolution Scale  : {TARGET_CELL} meters/pixel\n")
+        print(f"{'Category/Class ID':<22} | {'Pixel Count':<14} | {'Percentage':<12} | {'Estimated Area'}")
+        print("-" * 72)
+        
+        # Mapping numerical cluster indexes if explicitly handled inside lookups
+        for cid, count in zip(u_classes, counts):
+            pct = (count / total_px) * 100
+            area_m2 = count * (TARGET_CELL ** 2)
+            print(f"Class Code {cid:<11} | {count:<14,} | {pct:<11.2f}% | {area_m2:,.2f} m²")
+            
+        print("-" * 72)
+        print("Comfort Score Density Spread:")
+        print(f"  -> Absolute Minimum Score : {np.min(comfort_heatmap):.4f}")
+        print(f"  -> Absolute Maximum Score : {np.max(comfort_heatmap):.4f}")
+        print(f"  -> Weighted Mean Baseline : {np.mean(comfort_heatmap):.4f}")
+        print(f"  -> Standard Deviation     : {np.std(comfort_heatmap):.4f}")
+        print("=" * 60)
+
     except Exception as fusion_err:
         import traceback
         print(f"Warning: Mask fusion failed with error: {fusion_err}")
@@ -486,14 +610,11 @@ def run_pipeline(config_path, image_override=None):
     else:
         print("\nWarning: visualize.py not found in the pipeline directory.")
 
-    # =========================================================================
-    # ADDED: PIPELINE EVALUATION TRIGGER (WITH PATH FALLBACKS)
-    # =========================================================================
+    # Trigger Evaluation Script
     eval_candidates = [
         os.path.join(REPO_ROOT, "evaluate_pipeline.py"),
         os.path.join(SCRIPT_DIR, "evaluate_pipeline.py")
     ]
-    
     evaluate_script = next((p for p in eval_candidates if os.path.exists(p)), None)
 
     if evaluate_script:
@@ -502,12 +623,10 @@ def run_pipeline(config_path, image_override=None):
         print("=" * 60)
         
         tile_name = os.path.basename(resolved_image)
-        
         cmd_eval = [
             sys.executable, evaluate_script,
             tile_name
         ]
-        
         print(f"Executing: {' '.join(cmd_eval)}")
         subprocess.run(cmd_eval)
     else:

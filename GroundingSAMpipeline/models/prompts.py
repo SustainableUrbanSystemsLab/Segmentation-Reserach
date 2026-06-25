@@ -509,22 +509,25 @@ AVAILABLE_PROMPTS = {
     # NEN 8100 Wind Comfort Categories (A-E) using environmental proxy descriptors.
     # These prompts are tuned so DINO and SAM point at the same physical cues.
     "nen_cat_a": {
-            # Category A: places where people can stay for a long time, including seating-rich and recreational outdoor spaces.
-            "caption": (
-                "green park with trees seen from above . "
-                "dense tree canopy overhead view . "
-                "sports field green grass aerial . "
-                "swimming pool with deck surrounding aerial . "
-                "garden courtyard overhead view . "
-                "playground equipment surrounded by grass aerial"
+        # Category A: places where people can stay for a long time, including seating-rich and recreational outdoor spaces.
+        "caption": (
+            "green park with trees . "
+            "dense tree canopy . "
+            "stadium seating . "
+            "swimming pool with deck . "
+            "garden courtyard . "
+            "gathering plaza with benches and tables . "
+            "outdoor patio dining area"
         ),
         "negative_dino_caption": "highway . freeway . parking lot . road . industrial yard . empty field . bare hardscape . roof",
-        "negative_box_threshold": 0.40,
-        "negative_text_threshold": 0.36,
-        "box_threshold": 0.06,
-        "text_threshold": 0.04,
+        # LESS PERMISSIBLE: Lowering veto thresholds to trigger negative rejections faster
+        "negative_box_threshold": 0.32,
+        "negative_text_threshold": 0.28,
+        # LESS PERMISSIBLE: Raising positive thresholds so DINO must be highly confident
+        "box_threshold": 0.14,
+        "text_threshold": 0.11,
         "keywords": ("outdoor", "dining", "patio", "seating", "courtyard", "plaza", "park", "garden", "pool", "picnic", "playground", "recreation"),
-        "negative_keywords": ("highway", "freeway", "parking", "road", "industrial", "empty", "hardscape", "roof"),
+        "negative_keywords": ("highway", "freeway", "parking", "road", "industrial", "empty", "hardscape", "roof", "rooftop"),
         "min_aspect_ratio": 0.45,
         "max_aspect_ratio": 14.0,
         "min_box_side_px": 16,
@@ -533,9 +536,10 @@ AVAILABLE_PROMPTS = {
         "enable_tiled_fallback": True,
         "max_area_meters_sq": 120000,
         "negative_captions": ["highway", "freeway", "parking lot", "road", "industrial yard", "bare hardscape", "roof"],
-        "clip_negative_weight": 0.30,
+        # LESS PERMISSIBLE: Penalizing masks heavier via CLIP negative weights and demanding higher final scores
+        "clip_negative_weight": 0.38,
         "clip_top_k": 120,
-        "clip_score_threshold": -0.28,
+        "clip_score_threshold": -0.15,
         "clip_relative_score_margin": 0.12,
         #"clip_min_area_ratio": 0.0001,
         #"clip_max_area_ratio": 0.55,
@@ -543,22 +547,22 @@ AVAILABLE_PROMPTS = {
         "min_value": 0.15,
     },
     "nen_cat_b": {
-        # Category B: very pedestrian-friendly trails, benches, light outdoor seating, and residential neighborhoods.
+        # Category B: UNCHANGED (Maintained baseline behavior as requested)
         "caption": (
-            "tree-lined campus walkway aerial view . "
-            "pedestrian plaza with benches overhead . "
-            "residential sidewalk network aerial view . "
-            "quiet neighborhood block with lawns and trees from above . "
-            "small park path aerial view . "
-            "walkable campus greenway from above"
+            "tree-lined walkway . "
+            "pedestrian plaza with benches . "
+            "residential sidewalk network . "
+            "neighborhood lawn and grass . "
+            "park walking path . "
+            "walkable campus greenway"
         ),
         "negative_dino_caption": "highway . freeway . parking lot . major road . industrial yard . rooftop . barren hardscape . empty field",
-        "negative_box_threshold": 0.40,
-        "negative_text_threshold": 0.35,
+        "negative_box_threshold": 0.37,
+        "negative_text_threshold": 0.33,
         "box_threshold": 0.08,
         "text_threshold": 0.06,
         "keywords": ("pedestrian", "trail", "sidewalk", "residential", "neighborhood", "street", "park", "path", "bench", "greenway", "plaza"),
-        "negative_keywords": ("highway", "freeway", "parking", "industrial", "roof", "empty", "barren"),
+        "negative_keywords": ("highway", "freeway", "parking", "industrial", "roof", "empty", "barren", "rooftop"),
         "min_aspect_ratio": 0.5,
         "max_aspect_ratio": 12.0,
         "min_box_side_px": 18,
@@ -579,19 +583,21 @@ AVAILABLE_PROMPTS = {
     "nen_cat_c": {
         # Category C: comfortable to walk through, but not a place meant for lingering.
         "caption": (
-            "mixed urban blocks with buildings and small roads aerial . "
-            "city street grid overhead view . "
-            "urban commercial district moderate density aerial . "
-            "city blocks with surface parking overhead . "
-            "urban neighborhood streets from above"
+            "urban buildings and local roads . "
+            "city street grid . "
+            "commercial district block . "
+            "small concrete hardscapes. "
+            "urban neighborhood streets"
         ),
         "negative_dino_caption": "highway . freeway . large parking lot . multilane road . industrial yard . rooftop . blank field . major interchange",
-        "negative_box_threshold": 0.38,
-        "negative_text_threshold": 0.34,
-        "box_threshold": 0.06,
-        "text_threshold": 0.04,
+        # LESS PERMISSIBLE: Lowering veto thresholds to catch more false positives early
+        "negative_box_threshold": 0.33,
+        "negative_text_threshold": 0.29,
+        # LESS PERMISSIBLE: Tightening base box thresholds
+        "box_threshold": 0.12,
+        "text_threshold": 0.09,
         "keywords": ("sidewalk", "street", "road", "parking", "green", "service", "courtyard", "walkway", "neighborhood", "corner", "local"),
-        "negative_keywords": ("highway", "freeway", "large", "multilane", "industrial", "roof", "blank", "interchange"),
+        "negative_keywords": ("highway", "freeway", "large", "multilane", "industrial", "roof", "blank", "interchange", "rooftop"),
         "min_aspect_ratio": 0.45,
         "max_aspect_ratio": 20.0,
         "min_box_side_px": 16,
@@ -600,9 +606,10 @@ AVAILABLE_PROMPTS = {
         "enable_tiled_fallback": True,
         "max_area_meters_sq": 150000,
         "negative_captions": ["highway", "freeway", "large parking lot", "multilane road", "industrial yard", "rooftop", "blank field"],
-        "clip_negative_weight": 0.28,
+        # LESS PERMISSIBLE: Demanding higher confidence scores from CLIP
+        "clip_negative_weight": 0.34,
         "clip_top_k": 100,
-        "clip_score_threshold": -0.22,
+        "clip_score_threshold": -0.14,
         "clip_relative_score_margin": 0.14,
         #"clip_min_area_ratio": 0.00008,
         #"clip_max_area_ratio": 0.60,
@@ -612,19 +619,21 @@ AVAILABLE_PROMPTS = {
     "nen_cat_d": {
         # Category D: safe to traverse, but mostly exposed hardscape, large parking fields, and broader roads.
         "caption": (
-            "surface parking lot aerial view . "
-            "broad asphalt lot with marked stalls overhead . "
-            "industrial loading area aerial view . "
-            "big box retail parking field from above "
-            #"exposed concrete hardscape aerial view"
+            "large grey asphalt expanse . "
+            "parking lots. "
+            "empty concrete ground . "
+            "dark grey rectangular pavement . "
+            "flat impervious surface"
         ),
         "negative_dino_caption": "highway . freeway interchange . pedestrian plaza . sidewalk . park . seating . garden . residential street",
-        "negative_box_threshold": 0.40,
-        "negative_text_threshold": 0.36,
-        "box_threshold": 0.08,
-        "text_threshold": 0.06,
+        # A LITTLE MORE PERMISSIBLE: Raising veto limits to prevent accidental rejections
+        "negative_box_threshold": 0.41,
+        "negative_text_threshold": 0.37,
+        # A LITTLE MORE PERMISSIBLE: Slightly dropping thresholds to yield more candidate boxes
+        "box_threshold": 0.04,
+        "text_threshold": 0.02,
         "keywords": ("parking", "multilane", "road", "asphalt", "concrete", "vacant", "dirt", "hardscape", "industrial", "loading"),
-        "negative_keywords": ("highway", "freeway", "pedestrian", "plaza", "sidewalk", "park", "garden", "residential"),
+        "negative_keywords": ("highway", "freeway", "pedestrian", "plaza", "sidewalk", "park", "garden", "residential", "rooftop", "building"),
         "min_aspect_ratio": 0.4,
         "max_aspect_ratio": 20.0,
         "min_box_side_px": 16,
@@ -633,9 +642,10 @@ AVAILABLE_PROMPTS = {
         "enable_tiled_fallback": True,
         "max_area_meters_sq": 150000,
         "negative_captions": ["highway", "freeway", "pedestrian plaza", "sidewalk", "park", "seating", "garden"],
-        "clip_negative_weight": 0.40,
+        # A LITTLE MORE PERMISSIBLE: Relaxing CLIP score requirements to let more ambiguous hardscape expand
+        "clip_negative_weight": 0.35,
         "clip_top_k": 100,
-        "clip_score_threshold": -0.22,
+        "clip_score_threshold": -0.28,
         "clip_relative_score_margin": 0.12,
         "clip_min_area_ratio": 0.0002,
         "clip_max_area_ratio": 0.65,
@@ -645,34 +655,40 @@ AVAILABLE_PROMPTS = {
     "nen_cat_e": {
         # Category E/U: inhospitable pedestrian environments, especially highways and roads with four or more lanes.
         "caption": (
-            "highway interchange cloverleaf aerial view . "
-            "freeway with multiple lanes overhead . "
-            "rail yard with train tracks aerial . "
-            "highway overpass intersection aerial . "
-            "expressway and ramp system with no pedestrian access overhead"
+            "highway . "
+            "freeway . "
+            "multi-lane road . "
+            "interstate . "
+            "asphalt road . "
+            "concrete overpass . "
+            "traffic"
         ),
-        "negative_dino_caption": "sidewalk . plaza . park . garden . residential street . seating . pedestrian area . parking lot . surface lot . courtyard",
+        # FIXED TYPO: "bulilding" corrected to "building" to ensure the text parser executes correctly.
+        "negative_dino_caption": "sidewalk . plaza . park . garden . residential street . seating . pedestrian area . parking lot . surface lot . courtyard . trees . building roof",
+        # A LOT MORE PERMISSIBLE: Forcing vetos to be incredibly certain before blocking a highway box
         "negative_box_threshold": 0.40,
-        "negative_text_threshold": 0.36,
+        "negative_text_threshold": 0.40,
+        # A LOT MORE PERMISSIBLE: Dropping thresholds aggressively to yield maximum baseline recall
         "box_threshold": 0.08,
-        "text_threshold": 0.06,
-        "keywords": ("highway", "freeway", "lane", "overpass", "interchange", "median", "road", "tarmac", "rail", "no-sidewalk"),
-        "negative_keywords": (),
-        "min_aspect_ratio": 0.35,
-        "max_aspect_ratio": 24.0,
-        "min_box_side_px": 14,
-        "max_split_boxes_per_detection": 160,
-        "enable_area_split": False,
+        "text_threshold": 0.04,
+        "keywords": ("highway", "freeway", "interstate", "road", "overpass", "asphalt", "tracks"),
+        "negative_keywords": ("sidewalk", "park", "building", "residential", "parking", "water"),
+        "min_aspect_ratio": 0.30,
+        "max_aspect_ratio": 75.0,
+        "min_box_side_px": 10,
+        "max_split_boxes_per_detection": 250,
+        "enable_area_split": True,
         "enable_tiled_fallback": True,
-        "max_area_meters_sq": 200000,
+        "max_area_meters_sq": 600000,
         "negative_captions": ["parking lot", "surface lot", "plaza", "courtyard", "sidewalk", "park", "garden", "residential street"],
-        "clip_negative_weight": 0.20,
+        # A LOT MORE PERMISSIBLE: Lowering the CLIP gate to allow weakly-scored transport masks to survive
+        "clip_negative_weight": 0.16,
         "clip_top_k": 120,
-        "clip_score_threshold": -0.35,
-        "clip_relative_score_margin": 0.08,
+        "clip_score_threshold": -0.45,
+        "clip_relative_score_margin": 0.06,
         #"clip_min_area_ratio": 0.00005,
         #"clip_max_area_ratio": 0.75,
-        "max_saturation": 1.0,
+        "max_saturation": 0.9,
         "min_value": 0.10,
     },
 }

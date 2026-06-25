@@ -71,6 +71,8 @@ def fuse_urban_masks(
     building_binary = _bin("buildings")
     sidewalk_binary = _bin("sidewalk")
     crosswalk_binary = _bin("crosswalk")
+    seating_binary  = _bin("seating")
+    garden_binary   = _bin("garden")
 
     # ── 3. Build confidence maps ──────────────────────────────────────────────
 
@@ -143,6 +145,8 @@ def fuse_urban_masks(
     # Their prob rasters don't bleed significantly because features are narrow.
     sidewalk_conf  = _raw("sidewalk",  sidewalk_binary)
     crosswalk_conf = _raw("crosswalk", crosswalk_binary)
+    seating_conf   = _raw("seating",   seating_binary)
+    garden_conf    = _raw("garden",    garden_binary)
 
     # ── LC-ONLY classes: set below typical model detection confidence ─────────
     # Goal: model-detected classes beat LC in pixels where both have signal.
@@ -167,17 +171,20 @@ def fuse_urban_masks(
         FinalClass.ROAD,       FinalClass.PARKING,    FinalClass.BUILDING,
         FinalClass.SIDEWALK,   FinalClass.CROSSWALK,  FinalClass.IMPERVIOUS,
         FinalClass.WATER,      FinalClass.CANOPY,     FinalClass.LOWVEG,
+        FinalClass.SEATING,    FinalClass.GARDEN,
     ], dtype=np.uint8)
 
     conf_arrays = [
         road_conf, parking_conf, building_conf,
         sidewalk_conf, crosswalk_conf, impervious_conf,
         water_conf, canopy_conf, lowveg_conf,
+        seating_conf, garden_conf,
     ]
     conf_names = [
         "road", "parking", "building",
         "sidewalk", "crosswalk", "impervious",
         "water", "canopy", "lowveg",
+        "seating", "garden",
     ]
 
     # Pre-argmax diagnostic

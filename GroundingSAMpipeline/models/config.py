@@ -61,7 +61,7 @@ annotation_iou_xml_path = None  # Optional explicit annotation JSON/XML path or 
 annotation_iou_output_dir = Path("results") / "annotation_iou"
 
 # DINO settings - Set use_dino=False to skip DINO and use SAM's automatic mask generation instead
-use_dino = False
+use_dino = True
 dino_only = False  # Temporary debug mode: run only DINO and skip SAM + CLIP stages
 dino_suppress_low_risk_warnings = True
 dino_full_resolution = False  # If True, skip global DINO resize and run at native pixel dimensions; False uses resize (faster, avoids OOM)
@@ -113,7 +113,7 @@ pixel_assignment_mode = "region_context"  # "legacy", "contrastive", or "region_
 # Only assign E tier if CLIP score > tier_e_threshold; otherwise fall back to C or A
 # Only assign C tier if CLIP score > tier_c_threshold; otherwise fall back to A
 # Set to 0 to disable threshold filtering
-tier_e_threshold = 0.16  # Only assign E if it is clearly transport-infrastructure-like
+tier_e_threshold = 0.10  # Only assign E if it is clearly transport-infrastructure-like
 tier_d_threshold = 0.05  # Make D easier to select for exposed hardscape and parking
 tier_c_threshold = 0.06  # Only assign C if moderately confident
 tier_b_threshold = 0.03  # Make B easier to select for pedestrian-friendly campus/residential areas
@@ -147,10 +147,10 @@ sam_prompt_box_expand_factors = {
 }
 
 # When use_dino=False, SAM will auto-generate masks. These settings control the auto-generation:
-sam_points_per_side = 16  # Grid density for automatic mask generation
-sam_pred_iou_thresh = 0.70  # Prediction IoU threshold for filtering masks
-sam_stability_score_thresh = 0.80  # Stability score threshold for filtering masks
-sam_min_mask_area_px = 50000  # Drop very small SAM masks so the output stays coarse
+sam_points_per_side = 38  # Grid density for automatic mask generation
+sam_pred_iou_thresh = 0.75  # Prediction IoU threshold for filtering masks
+sam_stability_score_thresh = 0.85  # Stability score threshold for filtering masks
+sam_min_mask_area_px = 5000  # Drop very small SAM masks so the output stays coarse
 # Coarse-to-fine smoothing for the final label map. Set to 0 or 1 to disable.
 coarse_to_fine_cell_px = 0
 

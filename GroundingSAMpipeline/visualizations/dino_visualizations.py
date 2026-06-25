@@ -68,6 +68,16 @@ def save_per_prompt_breakdown(
         "seated_dining": "#FF8800",
         "standing_gathering": "#00FFFF",
         "furniture": "#FFFF00",
+        "nen_cat_a": "#007333",
+        "nen_cat_b": "#73CC40",
+        "nen_cat_c": "#FFE633",
+        "nen_cat_d": "#FF8C1A",
+        "nen_cat_e": "#E61E1E",
+        "nen_a": "#007333",
+        "nen_b": "#73CC40",
+        "nen_c": "#FFE633",
+        "nen_d": "#FF8C1A",
+        "nen_e": "#E61E1E",
     }
     
     for idx, (prompt_name, records) in enumerate(sorted(prompt_groups.items())):

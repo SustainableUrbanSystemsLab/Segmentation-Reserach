@@ -170,11 +170,16 @@ def load_rgb(image_path, target_shape=None):
     rgb = (rgb - rgb.min()) / (rgb.max() - rgb.min() + 1e-6)
     return rgb, transform
 
-def flatten_layers(models_config):
+def flatten_layers(models_config, skip_dino=False, only_dino=False):
     """Flatten model configs into individual rendering layers (skip land_cover)."""
     layers = []
     for mcfg in models_config:
         if mcfg.get("name") == "land_cover":
+            continue
+        is_dino = (mcfg.get("name") == "dino_model")
+        if skip_dino and is_dino:
+            continue
+        if only_dino and not is_dino:
             continue
         output_path = mcfg.get("output_path")
         if mcfg.get("is_multiclass", False):
@@ -256,7 +261,7 @@ def render_combined_detections(rgb, transform, models_config, output_png):
     palette = ["#3498db", "#9b59b6", "#f1c40f", "#1abc9c", "#e67e22"]
     legend_elements = []
     total_features  = 0
-    layers = flatten_layers(models_config)
+    layers = flatten_layers(models_config, skip_dino=True)
 
     for idx, layer in enumerate(layers):
         name = layer["name"]
@@ -301,6 +306,54 @@ def render_combined_detections(rgb, transform, models_config, output_png):
     plt.tight_layout()
     plt.savefig(output_png, dpi=150, bbox_inches="tight")
     plt.close()
+def render_dino_detections(rgb, transform, models_config, output_png):
+    fig, ax = plt.subplots(figsize=(14, 14))
+    ax.imshow(rgb)
+
+    color_map = {
+        "seating":   "#9b59b6", # Amethyst
+        "garden":    "#27ae60", # Emerald Green
+    }
+    palette = ["#f1c40f", "#1abc9c", "#e67e22"]
+    legend_elements = []
+    total_features  = 0
+    layers = flatten_layers(models_config, only_dino=True)
+
+    for idx, layer in enumerate(layers):
+        name = layer["name"]
+        resolved_output = resolve_path(layer["output_path"], REPO_ROOT)
+        if not os.path.exists(resolved_output):
+            continue
+        features = load_features_in_meters(resolved_output)
+        color   = color_map.get(name, palette[idx % len(palette)])
+        patches = []
+        for feat in features:
+            props = feat.get("properties", {})
+            if not match_layer(props, layer):
+                continue
+            geom = feat["geometry"]
+            polys = [geom] if geom.geom_type == "Polygon" else list(geom.geoms)
+            for poly in polys:
+                raw_pixel_coords = geo_to_pixel(poly, transform)
+                corrected_coords = [(x, y) for x, y in raw_pixel_coords]
+                patches.append(MplPolygon(corrected_coords, closed=True))
+                
+        if patches:
+            ax.add_collection(PatchCollection(patches, facecolor="none", edgecolor=color,
+                                              linewidth=2.0, alpha=0.9))
+            total_features += len(patches)
+            legend_elements.append(mpatches.Patch(edgecolor=color, facecolor="none",
+                                                  label=f"{name.capitalize()} ({len(patches)})",
+                                                  linewidth=2))
+    if legend_elements:
+        ax.legend(handles=legend_elements, loc="upper right", frameon=True,
+                  facecolor="white", edgecolor="gray")
+    ax.set_title(f"DINO Raw Detections ({total_features} total features)",
+                  fontsize=16, fontweight="bold")
+    ax.axis("off")
+    plt.tight_layout()
+    plt.savefig(output_png, dpi=150, bbox_inches="tight")
+    plt.close()
     print(f"Saved: {output_png}")
 
 
@@ -327,6 +380,8 @@ def render_cleaned_mask(rgb, clean_map, output_png):
 
         FinalClass.CAR:        ([0.00, 0.00, 0.50], 0.90, "Car"),          # Dark navy
         FinalClass.POOL:       ([0.70, 0.20, 1.00], 0.85, "Pool"),         # Purple
+        FinalClass.SEATING:    ([0.60, 0.35, 0.15], 0.85, "Seating"),      # Brown
+        FinalClass.GARDEN:     ([0.15, 0.70, 0.15], 0.80, "Garden"),       # Fresh Green
     }
 
     legend_elements = []
@@ -626,6 +681,7 @@ def run(image_path, config_path):
     os.makedirs(results_dir, exist_ok=True)
 
     overlay_png    = os.path.join(results_dir, "overlay_combined.png")
+    dino_overlay_png = os.path.join(results_dir, "overlay_dino.png")
     heatmap_png    = os.path.join(results_dir, "overlay_comfort_heatmap.png")
     land_cover_png = os.path.join(results_dir, "overlay_land_cover.png")
     clean_mask_png = os.path.join(results_dir, "overlay_cleaned_mask.png")
@@ -659,6 +715,7 @@ def run(image_path, config_path):
 
     # 1. Raw vector detections overlay
     render_combined_detections(rgb, transform, raw_models, overlay_png)
+    render_dino_detections(rgb, transform, raw_models, dino_overlay_png)
 
     # 2. Raw land cover layer
     for mcfg in raw_models:

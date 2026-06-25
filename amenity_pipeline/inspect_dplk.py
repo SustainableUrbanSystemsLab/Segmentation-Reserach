@@ -3,7 +3,7 @@ Inspect the .dlpk to understand model requirements before running inference.
 """
 import zipfile, json, os
 
-DLPK_PATH = r"C:\Users\Ian\Documents\GitHub\Segmentation-Reserach\amenity_pipeline\models\RoadsExtraction_NorthAmerica.dlpk"
+DLPK_PATH = r"C:\Users\Ian\Documents\GitHub\Segmentation-Reserach\amenity_pipeline\models\PoolSegmentation_USA.dlpk"
 EXTRACT_DIR = r"C:\Users\Ian\Documents\GitHub\Segmentation-Reserach\amenity_pipeline\extracted_models"
 
 # Extract the dlpk (it's just a zip)

@@ -16,3 +16,4 @@ planet.local.json
 /models
 /models
 /amenity_pipeline/models
+/GroundingSAMpipeline/runs/segment/results

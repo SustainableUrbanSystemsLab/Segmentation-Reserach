@@ -14,10 +14,21 @@ from PIL import Image
 from models import config as cfg
 
 # Add GroundingDINO-main to path to import local checkout
-repo_root = Path(__file__).resolve().parents[1]
-dino_root = repo_root / "GroundingDINO-main"
-if dino_root.exists() and str(dino_root) not in sys.path:
-    sys.path.insert(0, str(dino_root))
+# Check multiple parent levels to robustly locate the checkout regardless of caller context
+dino_root = None
+for parent_level in [1, 2, 3]:
+    candidate = Path(__file__).resolve().parents[parent_level] / "GroundingDINO-main"
+    if candidate.exists():
+        dino_root = candidate
+        break
+
+if dino_root is not None:
+    if str(dino_root) not in sys.path:
+        sys.path.insert(0, str(dino_root))
+    print(f"[INFO] GroundingDINO path added: {dino_root}")
+else:
+    print("[WARN] GroundingDINO-main folder not found in parent paths.")
+
 
 
 def _create_groundingdino_fallback_extension() -> types.ModuleType:
@@ -85,12 +96,16 @@ def _create_groundingdino_fallback_extension() -> types.ModuleType:
 
 def _install_groundingdino_extension_fallback() -> None:
     """Install a Python fallback for groundingdino._C if no compiled extension exists."""
+    if dino_root is None:
+        sys.modules.setdefault("groundingdino._C", _create_groundingdino_fallback_extension())
+        return
 
     c_ext_candidates = list(dino_root.glob("groundingdino/_C*.pyd")) + list(dino_root.glob("groundingdino/_C*.so"))
     if c_ext_candidates:
         return
 
     sys.modules.setdefault("groundingdino._C", _create_groundingdino_fallback_extension())
+
 
 
 _install_groundingdino_extension_fallback()
@@ -1146,6 +1161,16 @@ def save_dino_detection_viz(
         "seated_dining": "orange",
         "standing_gathering": "cyan",
         "furniture": "yellow",
+        "nen_cat_a": "darkgreen",
+        "nen_cat_b": "limegreen",
+        "nen_cat_c": "gold",
+        "nen_cat_d": "orange",
+        "nen_cat_e": "crimson",
+        "nen_a": "darkgreen",
+        "nen_b": "limegreen",
+        "nen_c": "gold",
+        "nen_d": "orange",
+        "nen_e": "crimson",
     }
     max_labels = 40
 

@@ -42,5 +42,5 @@
     "resize_to": null,
     "IsMultispectral": false,
     "ModelFormat": "NCHW",
-    "Version": "2024.04.01"
+    "Version": "2024.03.28"
 }

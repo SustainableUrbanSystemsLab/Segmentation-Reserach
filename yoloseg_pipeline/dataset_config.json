@@ -5,7 +5,7 @@
   "source_dir": "Maps/Tiles/Atlanta_split_google",
   "output_dir": "data/yoloseg_windcomfort_rgb_sliced",
   "val_ratio": 0.2,
-  "seed": 42,
+  "seed": 0,
   "overwrite": true,
   "skip_empty_label_tiles": true,
   "tile_size": 2560,

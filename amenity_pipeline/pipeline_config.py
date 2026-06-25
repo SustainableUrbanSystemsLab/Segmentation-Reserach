@@ -42,6 +42,8 @@ class FinalClass:
     CROSSWALK  = 9
     CAR        = 10
     POOL       = 11
+    SEATING    = 12
+    GARDEN     = 13
 
     @classmethod
     def name(cls, cid: int) -> str:
@@ -49,13 +51,14 @@ class FinalClass:
             1: "water",      2: "canopy",    3: "lowveg",
             4: "impervious", 5: "road",      6: "parking",
             7: "building",   8: "sidewalk",  9: "crosswalk",
-            10: "car",       11: "pool"
+            10: "car",       11: "pool",     12: "seating",
+            13: "garden"
         }
         return _MAP.get(cid, f"class_{cid}")
 
     @classmethod
     def all_ids(cls) -> List[int]:
-        return [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        return [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NEN-8100 thresholds
@@ -85,6 +88,8 @@ _DEFAULT_WEIGHT: Dict[int, float] = {
     FinalClass.CROSSWALK:  0.25,
     FinalClass.CAR:       -0.20,
     FinalClass.POOL:      -0.10, # Added default for pool
+    FinalClass.SEATING:    0.35,
+    FinalClass.GARDEN:     0.40,
 }
 
 _DEFAULT_RADIUS: Dict[int, float] = {cid: 0.0 for cid in FinalClass.all_ids()}
@@ -102,6 +107,8 @@ _KEY_TO_FINAL: Dict[str, int] = {
     "crosswalk":  FinalClass.CROSSWALK,
     "car":        FinalClass.CAR,
     "pool":       FinalClass.POOL,
+    "seating":    FinalClass.SEATING,
+    "garden":     FinalClass.GARDEN,
 }
 # ─────────────────────────────────────────────────────────────────────────────
 # Dataclasses

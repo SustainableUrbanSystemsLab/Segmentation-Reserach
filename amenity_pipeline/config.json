@@ -20,11 +20,11 @@
     },
     {
       "name": "pools",
-      "enabled": false,
+      "enabled": true,
       "script_path": "prediction_models/pool_predict.py",
       "output_path": "Results/amenity_pipeline/pools.geojson",
       "python_interpreter": "C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\Scripts\\propy.bat",
-      "extra_args": ["--threshold", "0.7", "--overlap", "256", "--cell_size", "0.15"]
+      "extra_args": ["--threshold", "0.60", "--overlap", "256", "--cell_size", "0.15", "--min_blue", "0"]
     },
     {
       "name": "pedestrian_infrastructure",
@@ -72,6 +72,18 @@
         "9": { "name": "Impervious Roads",    "threshold": 0.45 }
       },
       "extra_args": ["--overlap", "256", "--cell_size", "0.3"]
+    },
+    {
+      "name": "dino_model",
+      "enabled": true,
+      "script_path": "prediction_models/dino_predict.py",
+      "output_path": "Results/amenity_pipeline/dino.geojson",
+      "is_multiclass": true,
+      "classes": {
+        "seating": { "name": "gathering area", "threshold": 0.25, "prompt": "plazas aerial view . courtyard aerial view . pavilions . outdoor seating aerial view" },
+        "garden":  { "name": "garden",  "threshold": 0.25, "prompt": "garden . flowerbed . landscaped garden . flower bed" }
+      },
+      "extra_args": ["--overlap", "256", "--cell_size", "0.1"]
     }
   ],
 
@@ -99,6 +111,8 @@
     "sidewalk":   { "weight":  0.45, "radius":  60 },
     "crosswalk":  { "weight":  0.25, "radius":  30 },
     "car":        { "weight": -0.15, "radius":  16 },
-    "pool":       { "weight":  0.30, "radius":  20 }
+    "pool":       { "weight":  0.50, "radius":  20 },
+    "seating":    { "weight":  0.35, "radius":  20 },
+    "garden":     { "weight":  0.40, "radius":  30 }
   }
 }
